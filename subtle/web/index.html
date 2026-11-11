@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Subtle</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/app.css">
+<script>try { var t = localStorage.getItem('subtle-theme'); if (t) document.documentElement.dataset.theme = t; } catch (e) {}</script>
+</head>
+<body>
+
+<header class="top">
+  <a class="brand" href="#/" aria-label="Subtle: back to the queue">
+    <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true">
+      <rect x="2" y="5" width="28" height="22" rx="6" fill="var(--accent)"/>
+      <rect x="7" y="13" width="10" height="3" rx="1.5" fill="var(--accent-ink)"/>
+      <rect x="19" y="13" width="6" height="3" rx="1.5" fill="var(--accent-ink)" opacity=".55"/>
+      <rect x="7" y="19" width="6" height="3" rx="1.5" fill="var(--accent-ink)" opacity=".55"/>
+      <rect x="15" y="19" width="10" height="3" rx="1.5" fill="var(--accent-ink)"/>
+    </svg>
+    <span>Subtle</span>
+  </a>
+  <span class="tag" id="mockTag" hidden>Demo mode: fake translations, no API calls</span>
+  <div class="grow"></div>
+  <div class="spend" id="spend" title="Spent on the files currently in the queue"></div>
+  <button class="btn ghost icon" id="themeBtn" aria-label="Switch between light and dark" title="Light / dark"></button>
+  <button class="btn ghost" id="autoBtn">Automation</button>
+  <button class="btn ghost" id="settingsBtn">Settings</button>
+</header>
+
+<!-- ───────────── Queue ───────────── -->
+<main id="home" class="page">
+  <div class="banner" id="keyBanner" hidden>
+    <div><strong>No API key yet.</strong> Subtle needs an Anthropic API key to translate. You can look around without one.</div>
+    <button class="btn" id="keyBannerBtn">Set up</button>
+  </div>
+
+  <section class="setup" aria-label="How to translate">
+    <div class="field f-lang">
+      <label for="lang">Translate into</label>
+      <input id="lang" list="langs" placeholder="Choose a language…" autocomplete="off" spellcheck="false">
+      <datalist id="langs"></datalist>
+    </div>
+    <div class="field f-model">
+      <label id="modelLabel">Model</label>
+      <div class="seg" id="models" role="radiogroup" aria-labelledby="modelLabel"></div>
+    </div>
+    <div class="field">
+      <label for="register">Tone</label>
+      <select id="register">
+        <option value="auto">Match the scene</option>
+        <option value="informal">Informal</option>
+        <option value="formal">Formal</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="sdh">Sound descriptions</label>
+      <select id="sdh">
+        <option value="keep">Translate</option>
+        <option value="strip">Remove</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="lyrics">Song lyrics</label>
+      <select id="lyrics">
+        <option value="keep">Leave as they are</option>
+        <option value="translate">Translate</option>
+      </select>
+    </div>
+    <div class="field f-notes">
+      <label for="notes">Notes for the translator <span class="opt">optional</span></label>
+      <input id="notes" maxlength="400" placeholder="e.g. Crime drama. Inspector Hale is a woman. Keep street names in English.">
+    </div>
+    <div class="field f-gloss">
+      <label>&nbsp;</label>
+      <button class="btn" id="glossaryBtn">Glossary</button>
+    </div>
+  </section>
+
+  <section class="drop" id="drop">
+    <div class="drop-title">Drop subtitle files here</div>
+    <div class="drop-sub">.srt · .vtt · .ass · .txt &nbsp;—&nbsp; timing and formatting stay exactly as they are</div>
+    <div class="drop-actions">
+      <button class="btn" id="pickBtn">Choose files</button>
+      <button class="btn" id="folderBtn">Add a folder…</button>
+      <input type="file" id="picker" multiple accept=".srt,.vtt,.ass,.ssa,.txt" hidden>
+    </div>
+  </section>
+
+  <section class="queue" id="queue" hidden>
+    <div class="queue-head">
+      <h2>Queue</h2>
+      <span class="muted" id="queueSummary"></span>
+      <div class="grow"></div>
+      <button class="btn ghost" id="clearBtn">Clear finished</button>
+      <button class="btn ghost" id="zipBtn">Download all</button>
+      <button class="btn primary" id="goBtn">Translate</button>
+    </div>
+    <div class="jobs" id="jobs"></div>
+  </section>
+</main>
+
+<!-- ───────────── Review ───────────── -->
+<main id="review" class="page wide" hidden>
+  <div class="rv-head">
+    <a class="back" href="#/">← Queue</a>
+    <h1 id="rvName"></h1>
+    <div class="chips" id="rvChips"></div>
+    <div class="grow"></div>
+    <div class="rv-actions" id="rvActions"></div>
+  </div>
+  <div class="rv-note" id="rvNote" hidden></div>
+  <div class="rv-bar">
+    <div class="tabs" id="rvTabs" role="tablist"></div>
+    <div class="grow"></div>
+    <label class="check" id="followWrap" hidden><input type="checkbox" id="follow" checked> Follow along</label>
+    <input id="search" type="search" placeholder="Search lines…  ( / )" aria-label="Search lines">
+  </div>
+  <div class="grid-head"><div>#</div><div>Time</div><div>Original</div><div>Translation</div><div></div></div>
+  <div class="rows" id="rows"></div>
+  <div class="empty" id="rowsEmpty" hidden>Nothing matches.</div>
+</main>
+
+<!-- ───────────── Dialogs ───────────── -->
+<dialog id="settingsDlg">
+  <form method="dialog" class="dlg">
+    <h2>Settings</h2>
+
+    <h3>API key</h3>
+    <p class="muted" id="keyStatus"></p>
+    <div class="inline" id="keyRow">
+      <input type="password" id="apiKey" placeholder="sk-ant-…" autocomplete="off" spellcheck="false">
+      <button class="btn" type="button" id="keySave">Save key</button>
+      <button class="btn ghost" type="button" id="keyRemove" hidden>Remove</button>
+    </div>
+    <p class="hint">Kept in a settings file on this computer. An <code>ANTHROPIC_API_KEY</code> environment variable takes priority if one is set.</p>
+
+    <h3>Spending</h3>
+    <div class="form-grid">
+      <label for="budget">Stop a file once it has cost</label>
+      <div class="inline"><span class="unit">$</span><input type="number" id="budget" min="0" step="0.05"><span class="hint">0 = automatic: four times the estimate</span></div>
+      <label for="escalate">Lines the model keeps getting wrong</label>
+      <select id="escalate">
+        <option value="">Flag them for me</option>
+        <option value="claude-sonnet-5-5">Retry just those with Sonnet 5.5</option>
+        <option value="claude-opus-5-5">Retry just those with Opus 5.5</option>
+      </select>
+      <label for="chunk">Lines per request</label>
+      <div class="inline"><input type="number" id="chunk" min="20" max="400" step="10"><span class="hint">larger = fewer requests, slightly more risk of skipped lines</span></div>
+      <label for="conc">Files at once</label>
+      <div class="inline"><input type="number" id="conc" min="1" max="8"></div>
+    </div>
+
+    <h3>Subtitles</h3>
+    <div class="form-grid">
+      <label for="maxChars">Longest line</label>
+      <div class="inline"><input type="number" id="maxChars" min="20" max="80"><span class="hint">characters; translations are re-wrapped to fit</span></div>
+      <label for="maxCps">Reading speed limit</label>
+      <div class="inline"><input type="number" id="maxCps" min="8" max="40"><span class="hint">characters per second before a line is flagged</span></div>
+    </div>
+    <label class="check"><input type="checkbox" id="saveNext"> Save each translation next to its source file (files added from a folder)</label>
+    <label class="check"><input type="checkbox" id="bilingual"> Keep the original line under each translation</label>
+
+    <h3>Cache</h3>
+    <div class="inline">
+      <button class="btn" type="button" id="cacheClear">Clear cached translations</button>
+      <span class="hint">Finished chunks are remembered, so repeating a file costs nothing.</span>
+    </div>
+    <p class="hint" id="about"></p>
+
+    <div class="dlg-foot"><button class="btn primary" id="settingsDone" value="ok">Done</button></div>
+  </form>
+</dialog>
+
+<dialog id="autoDlg">
+  <form method="dialog" class="dlg">
+    <h2>Automation</h2>
+    <p class="muted">Translate new downloads without being asked. Sonarr or Radarr report an import, Bazarr gets the first chance to find real subtitles, and whatever is still missing is translated and saved next to the video.</p>
+    <ul class="status-list" id="autoStatus"></ul>
+
+    <h3>Sonarr and Radarr</h3>
+    <ul class="status-list" id="autoArr"></ul>
+    <div class="inline spaced">
+      <button class="btn" type="button" id="autoConnect">Connect Sonarr or Radarr…</button>
+      <span class="hint">Subtle adds its own webhook there and checks it can open your library.</span>
+    </div>
+    <details class="by-hand">
+      <summary>Add the webhook by hand instead</summary>
+      <p class="hint">In each app: Settings → Connect → add a Webhook, method POST, with the import and upgrade triggers ticked. Then press its Test button; the test shows up under Recent activity below.</p>
+      <div class="form-grid">
+        <label for="hookSonarr">Sonarr webhook URL</label>
+        <div class="inline"><input id="hookSonarr" readonly spellcheck="false"><button class="btn small" type="button" data-copy="hookSonarr">Copy</button></div>
+        <label for="hookRadarr">Radarr webhook URL</label>
+        <div class="inline"><input id="hookRadarr" readonly spellcheck="false"><button class="btn small" type="button" data-copy="hookRadarr">Copy</button></div>
+      </div>
+      <p class="hint" id="hookHint" hidden>These say “localhost” because that is how you opened this page. From another machine, use this computer's network address instead.</p>
+    </details>
+
+    <h3>Path mapping</h3>
+    <p class="hint">Only needed when Sonarr and Radarr see the library under a different path than this machine does, for example <code>/tv</code> there and <code>\\nas\media\tv</code> here.</p>
+    <div class="gl-head"><span>Path they report</span><span>The same folder on this machine</span><span></span></div>
+    <div id="mapRows"></div>
+    <button class="btn" type="button" id="mapAdd">Add a mapping</button>
+
+    <h3>Bazarr</h3>
+    <div class="form-grid">
+      <label for="bzUrl">Address</label>
+      <input id="bzUrl" placeholder="http://192.168.1.20:6767" spellcheck="false">
+      <label for="bzKey">API key</label>
+      <div class="inline"><input id="bzKey" type="password" autocomplete="off" spellcheck="false"><button class="btn small" type="button" id="bzTest">Test</button></div>
+      <label for="bzWait">Wait before translating</label>
+      <div class="inline"><input type="number" id="bzWait" min="0" max="10080"><span class="hint">minutes Bazarr gets to find subtitles. 0 = one search, then translate</span></div>
+    </div>
+
+    <h3>Spending</h3>
+    <div class="form-grid">
+      <label for="autoBudget">Daily limit for automatic translations</label>
+      <div class="inline"><span class="unit">$</span><input type="number" id="autoBudget" min="0" step="0.5"><span class="hint" id="autoSpent"></span></div>
+    </div>
+
+    <h3>Recent activity</h3>
+    <div class="activity" id="activity"></div>
+
+    <div class="dlg-foot"><button class="btn primary" value="ok">Done</button></div>
+  </form>
+</dialog>
+
+<dialog id="setupDlg">
+  <form method="dialog" class="dlg">
+    <h2>Set up Subtle</h2>
+    <p class="muted">Two things to translate a file. The third makes new downloads translate themselves.</p>
+
+    <h3><span class="step">1</span>Claude API key</h3>
+    <p class="muted" id="suKeyStatus"></p>
+    <div class="inline" id="suKeyRow">
+      <input type="password" id="suKey" placeholder="sk-ant-…" autocomplete="off" spellcheck="false" aria-label="Claude API key">
+      <button class="btn" type="button" id="suKeySave">Save key</button>
+    </div>
+
+    <h3><span class="step">2</span>Language to translate into</h3>
+    <input id="suLang" list="langs" placeholder="Choose a language…" autocomplete="off" spellcheck="false" aria-label="Language to translate into">
+
+    <h3><span class="step">3</span>Sonarr and Radarr <span class="opt">optional</span></h3>
+    <p class="hint">Give Subtle each app's address and API key (in the app: Settings → General → API Key). It adds its own webhook there, reads where your library is, and checks that it can open those folders from this machine.</p>
+    <div id="suArr"></div>
+    <div id="suReachRow" hidden>
+      <label class="hint" for="suReach">Address Sonarr and Radarr should use to reach Subtle, if the automatic one did not work</label>
+      <input id="suReach" placeholder="http://192.168.1.50:8756" spellcheck="false">
+    </div>
+
+    <p class="hint">Bazarr, the daily spending limit and the activity log are under Automation.</p>
+    <div class="dlg-foot"><button class="btn primary" value="ok">Done</button></div>
+  </form>
+</dialog>
+
+<dialog id="glossaryDlg">
+  <form method="dialog" class="dlg">
+    <h2>Glossary</h2>
+    <p class="muted">Names and terms that must always be translated the same way. Only the entries that occur in a request are sent with it, so a long list costs nothing.</p>
+    <div class="gl-head"><span>In the original</span><span>Translate as</span><span></span></div>
+    <div id="glRows"></div>
+    <button class="btn" type="button" id="glAdd">Add a term</button>
+    <div class="dlg-foot">
+      <button class="btn ghost" value="cancel">Cancel</button>
+      <button class="btn primary" type="button" id="glSave">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="folderDlg">
+  <form method="dialog" class="dlg">
+    <h2>Add a folder</h2>
+    <p class="muted">Paste the path of a folder on this computer or a mounted share. Every subtitle file under it is listed; translations are saved beside each one as <code id="folderExample">name.xx.srt</code>.</p>
+    <div class="inline">
+      <input id="folderPath" placeholder="D:\Media\Series\Some Show\Season 1" spellcheck="false">
+      <button class="btn" type="button" id="folderScan">Look</button>
+    </div>
+    <div id="folderList" class="folder-list"></div>
+    <div class="dlg-foot">
+      <button class="btn ghost" value="cancel">Cancel</button>
+      <button class="btn primary" type="button" id="folderAdd" disabled>Add</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toasts" aria-live="polite"></div>
+<script src="/app.js"></script>
+</body>
+</html>

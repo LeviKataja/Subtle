@@ -1,0 +1,19 @@
+[project]
+name = "subtle-subs"
+version = "0.1.0"
+description = "Token-lean subtitle translation harness with a local web UI"
+requires-python = ">=3.10"
+dependencies = ["anthropic>=1.0"]
+
+[project.scripts]
+subtle = "subtle.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["subtle"]
+
+[tool.setuptools.package-data]
+subtle = ["web/*"]
