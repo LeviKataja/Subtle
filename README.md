@@ -1,7 +1,21 @@
 # Subtle
 
-Translates subtitle files (`.srt`, `.vtt`, `.ass`/`.ssa`) and plain `.txt` with Claude, for
-about a cent an episode on the default model. Local web UI plus a command line.
+Translates subtitle files (`.srt`, `.vtt`, `.ass`/`.ssa`) and plain `.txt` with Claude, built
+to send as few tokens as it can: an estimated cent or so an episode on the default model.
+Local web UI plus a command line.
+
+## Status
+
+Early, and not yet run against the live Claude API. What has and has not been tried:
+
+| Part | State |
+|---|---|
+| Translating, repair, the web UI | Covered by the tests and tried by hand, but only with the built-in fake model. The costs below are estimates, and translation quality is unproven. |
+| Subtitles inside video files | Tried with real ffmpeg on MKV and MP4 files. Picture-based tracks only with stand-in data. |
+| Sonarr, Radarr, Bazarr | Written against their source and tested against stand-ins. Not tried with real instances. |
+| Dockerfile | Never built. |
+
+Start with one file and a low spending cap, and read the result before trusting it with a library.
 
 ## Run it
 
@@ -174,5 +188,22 @@ mid-way; the next import or **Add a folder** will catch it.
 - Speech-to-text. A video with no text subtitles in the source language cannot be translated.
 - Other model providers. `providers.py` is the seam: anything with a `complete()` method works.
 
-The server listens on this machine only unless you pass `--host`. With `--host 0.0.0.0` and no
-`--password`, anyone who can reach the port can use it and spend your API credit.
+## Security
+
+Subtle is meant for your own machine or home network, not the open internet.
+
+- It listens on this machine only unless you pass `--host`. With `--host 0.0.0.0` and no
+  `--password`, anyone who can reach the port can use it, list the subtitle and video files
+  under any folder it can read, and spend your API credit.
+- The password is HTTP Basic over plain HTTP. Beyond a network you trust, put Subtle behind a
+  reverse proxy that adds HTTPS.
+- The Claude, Sonarr, Radarr and Bazarr API keys are stored unencrypted in `config.json` in the
+  data folder (`~/.subtle` by default). Protect that folder as you would the keys.
+- Webhook URLs carry a secret in the query string, so it is visible in Sonarr's and Radarr's
+  settings and may appear in their logs.
+- The server reads subtitle and video files from the paths it is given and writes
+  `name.<lang>.srt` next to them. Run it as a user that can reach your media and little else.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).
