@@ -18,7 +18,8 @@ os.environ["SUBTLE_HOME"] = tempfile.mkdtemp(prefix="subtle-test-")
 from subtle import formats, qa  # noqa: E402
 from subtle.cache import Cache  # noqa: E402
 from subtle.chunker import make_chunks  # noqa: E402
-from subtle.engine import BudgetExceeded, Options, Translator, estimate, retranslate, translate  # noqa: E402
+from subtle.engine import (BudgetExceeded, Options, Translator, estimate, estimate_proof, proofread,  # noqa: E402
+                           retranslate, translate)
 from subtle.prep import prepare, wire_text  # noqa: E402
 from subtle.prompt import clean_title, glossary_hits, system_prompt, user_message  # noqa: E402
 from subtle.providers import Cancelled, MockProvider, pseudo  # noqa: E402
@@ -59,6 +60,15 @@ class Formats(unittest.TestCase):
         doc = formats.parse("a.srt", text.encode())
         self.assertEqual([c.text for c in doc.cues], ["Hello", "There"])
         self.assertEqual((doc.cues[1].start, doc.cues[1].end, doc.cues[1].meta["tail"]), (3000, 4500, "X1:10"))
+
+    def test_text_on_the_timing_line_is_not_lost(self):
+        text = ("1\n00:00:01,000 --> 00:00:02,000 to tear up into small strips, ok?\n\n"
+                "2\n00:00:03,000 --> 00:00:04,000 X1:10 Y1:20\nThere\n")
+        doc = formats.parse("a.srt", text.encode())
+        self.assertEqual([(c.text, c.meta["tail"]) for c in doc.cues],
+                         [("to tear up into small strips, ok?", ""), ("There", "X1:10 Y1:20")])
+        vtt = formats.parse("a.vtt", b"WEBVTT\n\n00:01.000 --> 00:02.000 Hello there\n\n00:03.000 --> 00:04.000 line:0\nBye\n")
+        self.assertEqual([(c.text, c.meta["tail"]) for c in vtt.cues], [("Hello there", ""), ("Bye", "line:0")])
 
     def test_vtt_keeps_notes_ids_and_settings(self):
         text = ("WEBVTT - demo\n\nNOTE keep me\n\nintro\n00:01.000 --> 00:03.000 line:0 position:20%\n"
@@ -204,6 +214,17 @@ class Engine(unittest.TestCase):
                 self.assertEqual((stats.failed, p.calls), (0, 2))  # one small request for what was lost
                 self.assertLess(len(p.requests[1]), len(p.requests[0]))
 
+    def test_a_line_that_comes_back_as_a_full_stop_is_translated_again(self):
+        doc, p = self.doc(), MockProvider(dot=(5,))
+        stats = translate(doc, Options(**FI), p)
+        self.assertEqual((stats.failed, stats.repaired, p.calls), (0, 1, 2))
+        clean = self.doc()
+        translate(clean, Options(**FI), MockProvider())
+        self.assertEqual([c.translation for c in doc.cues], [c.translation for c in clean.cues])
+        cue = doc.cues[18]
+        cue.translation = "."  # the same thing arriving by a hand edit or an old file is flagged
+        self.assertEqual(qa.check(cue, "fi"), ["empty"])
+
     def test_a_refused_line_is_isolated_and_flagged(self):
         doc, p = self.doc(), MockProvider(refuse="every flare we own")
         stats = translate(doc, Options(**FI), p)
@@ -273,6 +294,70 @@ class Engine(unittest.TestCase):
         self.assertIn("more casual", p.requests[-1])
         self.assertIn("character limits: 1: ", p.requests[-1])
         self.assertTrue(p.requests[-1].endswith("Translate:\n1|How long overdue?"))
+
+
+class Proofread(unittest.TestCase):
+    def translated(self):
+        doc = formats.parse("lighthouse.en.srt", SAMPLE)
+        translate(doc, Options(**FI), MockProvider())
+        return doc
+
+    def line(self, doc, cue):
+        """The number a cue's first line has in the proofreading request."""
+        units, plans = prepare(doc)
+        return [i for i, u in enumerate(units) if u.kind == "text"].index(plans[cue].units[0]) + 1
+
+    def test_only_corrected_lines_change_and_the_earlier_wording_is_kept(self):
+        doc = self.translated()
+        before = [c.translation for c in doc.cues]
+        self.assertEqual((self.line(doc, 1), self.line(doc, 2)), (2, 3))
+        p = MockProvider(fixes={2: "Lamppu sammui keskiyöllä, eikä kukaan saarella huomannut.",
+                                4: "- Lautta oli myöhässä. Minä en."})
+        stats, summary = proofread(doc, Options(**FI), p)
+        self.assertEqual((p.calls, stats.requests, summary["changed"], summary["dropped"]), (1, 1, [1, 2], 0))
+        self.assertEqual(" ".join(qa.visible(doc.cues[1].translation).split()),
+                         "Lamppu sammui keskiyöllä, eikä kukaan saarella huomannut.")
+        # the second speaker's line changed, the first one and the cue's two-line shape did not
+        self.assertEqual(doc.cues[2].translation, before[2].split("\n")[0] + "\n- Lautta oli myöhässä. Minä en.")
+        self.assertEqual([doc.cues[1].prev, doc.cues[2].prev], before[1:3])
+        rest = [i for i in range(len(doc.cues)) if i not in (1, 2)]
+        self.assertEqual([doc.cues[i].translation for i in rest], [before[i] for i in rest])
+        self.assertTrue(all(doc.cues[i].prev is None for i in rest))
+        request = p.requests[0]
+        self.assertIn("Proofread:\n1|[wind howling] => ", request)  # both languages, one line each
+        self.assertNotIn("-->", request)
+
+    def test_hand_edits_and_corrections_that_break_a_check_are_left_alone(self):
+        doc = self.translated()
+        doc.cues[1].translation, doc.cues[1].edited = "Käsin korjattu rivi.", True
+        before = [c.translation for c in doc.cues]
+        same = " ".join(doc.cues[20].translation.split())
+        p = MockProvider(fixes={self.line(doc, 1): "Koneen ehdotus.", self.line(doc, 5): ".",
+                                self.line(doc, 18): "sana " * 60, self.line(doc, 20): same})
+        stats, summary = proofread(doc, Options(**FI), p)
+        self.assertEqual((summary["changed"], summary["dropped"]), ([], 2))  # no words; far too long
+        self.assertEqual([c.translation for c in doc.cues], before)
+        self.assertTrue(all(c.prev is None for c in doc.cues))
+        self.assertIn("Käsin korjattu rivi.", p.requests[0])  # shown for context all the same
+
+    def test_a_second_pass_still_remembers_the_first_wording(self):
+        doc = self.translated()
+        first, n = doc.cues[18].translation, self.line(doc, 18)
+        proofread(doc, Options(**FI), MockProvider(fixes={n: "Kuinka pahasti?"}))
+        proofread(doc, Options(**FI), MockProvider(fixes={n: "Paljonko myöhässä?"}))
+        self.assertEqual((doc.cues[18].translation, doc.cues[18].prev), ("Paljonko myöhässä?", first))
+        proofread(doc, Options(**FI), MockProvider(fixes={n: first}))  # corrected back: no longer a change
+        self.assertEqual((doc.cues[18].translation, doc.cues[18].prev), (first, None))
+
+    def test_nothing_to_change_is_one_request_and_a_stronger_reader_costs_more(self):
+        doc = self.translated()
+        stats, summary = proofread(doc, Options(**FI), MockProvider(fixes={}), "claude-sonnet-5-5")
+        self.assertEqual((stats.requests, summary["changed"], summary["model"]), (1, [], "claude-sonnet-5-5"))
+        haiku, sonnet = estimate_proof(doc, Options(**FI)), estimate_proof(doc, Options(**FI), "claude-sonnet-5-5")
+        self.assertEqual(haiku["lines"], 26)
+        self.assertLess(haiku["cost"] * 10, sonnet["cost"])
+        untouched = formats.parse("lighthouse.en.srt", SAMPLE)
+        self.assertEqual(proofread(untouched, Options(**FI), MockProvider())[1]["lines"], 0)  # nothing translated yet
 
 
 class Server(unittest.TestCase):
@@ -360,6 +445,45 @@ class Server(unittest.TestCase):
         self.assertIn(pseudo("How long overdue?") + "\nHow long overdue?", text)
         self.assertEqual(self.call(f"/api/jobs/{job_id}", method="DELETE")[0], 200)
         self.assertEqual(self.call(f"/api/jobs/{job_id}")[0], 404)
+
+    def test_proofread_marks_changes_and_undo_puts_them_back(self):
+        self.call("/api/config", {"target": "finnish"})
+        _, job = self.call("/api/upload?name=Proof.S01E01.en.srt", raw=SAMPLE)
+        job_id = job["id"]
+        self.assertEqual(self.call(f"/api/jobs/{job_id}/proofread", {})[0], 400)  # not translated yet
+        self.call(f"/api/jobs/{job_id}/start", {})
+        done = self.wait(job_id)
+        self.assertGreater(done["proof_est"]["claude-sonnet-5-5"], done["proof_est"]["claude-haiku-5-5"])
+        before = {r["i"]: r["tr"] for r in done["rows"]}
+
+        self.assertEqual(self.call(f"/api/jobs/{job_id}/proofread", {"model": "claude-sonnet-5-5"})[0], 200)
+        job = self.wait(job_id)
+        changed = [r for r in job["rows"] if r["pv"] is not None]
+        self.assertGreater(len(changed), 1)
+        self.assertEqual((job["proofed"]["model"], job["proofed"]["changed"], job["changed"]),
+                         ("claude-sonnet-5-5", len(changed), len(changed)))
+        self.assertTrue(all(r["pv"] == before[r["i"]] and r["tr"] != r["pv"] for r in changed))
+        self.assertEqual(job["spent"]["requests"], done["spent"]["requests"] + 1)
+
+        _, row = self.call(f"/api/jobs/{job_id}/unproof/{changed[0]['i']}", {})
+        self.assertEqual((row["tr"], row["pv"]), (before[row["i"]], None))
+        self.assertEqual(self.call(f"/api/jobs/{job_id}/unproof", {})[1], {"restored": len(changed) - 1})
+        self.assertEqual({r["i"]: r["tr"] for r in self.call(f"/api/jobs/{job_id}")[1]["rows"]}, before)
+        self.call(f"/api/jobs/{job_id}", method="DELETE")
+
+    def test_proofreading_can_follow_every_translation(self):
+        self.call("/api/config", {"target": "finnish", "proofread": True, "proof_model": "claude-sonnet-5-5"})
+        try:
+            _, job = self.call("/api/upload?name=Auto.S01E01.en.srt", raw=SAMPLE)
+            self.call(f"/api/jobs/{job['id']}/start", {})
+            job = self.wait(job["id"])
+            self.assertEqual((job["status"], job["error"], job["proofed"]["model"]), ("done", "", "claude-sonnet-5-5"))
+            self.assertEqual(job["used"]["model"], "claude-haiku-5-5")  # translated by one model, read by another
+            self.assertGreater(job["changed"], 0)
+            self.call(f"/api/jobs/{job['id']}", method="DELETE")
+        finally:
+            _, state = self.call("/api/config", {"proofread": False, "proof_model": "no-such-model"})
+        self.assertEqual((state["config"]["proofread"], state["config"]["proof_model"]), (False, ""))
 
     def test_upload_rejects_files_without_subtitles(self):
         code, body = self.call("/api/upload?name=empty.srt", raw=b"\n\n")

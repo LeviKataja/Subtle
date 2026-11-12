@@ -21,6 +21,8 @@ DEFAULTS = {
     "notes": "",
     "glossary": [],  # [[source term, translation], ...]
     "budget": 0.0,  # USD cap per file; 0 = automatic (4x the estimate)
+    "proofread": False,  # read every finished translation once more and correct what needs it
+    "proof_model": "",  # the model that does the reading; "" = the one that translated the file
     "concurrency": 3,
     "save_next_to_source": True,
     "bilingual": False,

@@ -143,22 +143,28 @@ class MockProvider:
     """Offline stand-in: no key, no network, no cost. Used by the tests and `--mock`.
 
     `drop` lists line numbers to leave out of the first reply, `refuse` makes any request
-    containing that text come back as a refusal, and `cut` makes the first reply run into
-    the output limit half way through that line number, to exercise the repair paths.
+    containing that text come back as a refusal, `cut` makes the first reply run into
+    the output limit half way through that line number, and `dot` lists line numbers that
+    come back as a lone full stop the first time, to exercise the repair paths.
+
+    A proofreading request gets the corrections in `fixes` ({line number: new text}). Without
+    any, every eighth line of four words or more loses a word, so the demo has something to show.
     """
 
     def __init__(self, delay: float = 0.0, drop: tuple = (), refuse: str = "", chatter: bool = False,
-                 cut: int = 0):
+                 cut: int = 0, dot: tuple = (), fixes: dict | None = None):
         self.delay, self.drop, self.refuse, self.chatter = delay, set(drop), refuse, chatter
-        self.cut = cut
+        self.cut, self.dot, self.fixes = cut, set(dot), fixes
         self.calls = 0
         self.requests: list[str] = []
 
     def complete(self, model, system, user, on_text=None, cancel=None, max_tokens=16000) -> Completion:
         self.calls += 1
         self.requests.append(user)
-        body = user.rsplit("Translate:\n", 1)[-1]
         inp = (len(system) + len(user)) // 4
+        if "Proofread:\n" in user:
+            return self._proofread(user.rsplit("Proofread:\n", 1)[-1], inp, cancel)
+        body = user.rsplit("Translate:\n", 1)[-1]
         if self.refuse and self.refuse in body:
             return Completion("", "refusal", inp, 0)
         lines = ["Here is the translation:", ""] if self.chatter else []
@@ -167,6 +173,8 @@ class MockProvider:
             m = re.match(r"(\d+)\|(.*)", line)
             if m and not (self.calls == 1 and int(m.group(1)) in self.drop):
                 out = f"{m.group(1)}|{pseudo(m.group(2))}"
+                if self.calls == 1 and int(m.group(1)) in self.dot:
+                    out = f"{m.group(1)}|."
                 if self.calls == 1 and int(m.group(1)) == self.cut:
                     lines.append(out[:len(out) // 2 + 1])  # the limit lands in the middle of this line
                     stop = "max_tokens"
@@ -182,6 +190,23 @@ class MockProvider:
                 time.sleep(self.delay)
         text = "\n".join(lines)
         return Completion(text, stop, inp, len(text) // 3)
+
+    def _proofread(self, body: str, inp: int, cancel) -> Completion:
+        for _ in range(20 if self.delay else 0):  # long enough to see "Proofreading…" in the demo
+            if cancel and cancel():
+                raise Cancelled()
+            time.sleep(self.delay)
+        if self.fixes is not None:
+            lines = [f"{n}|{text}" for n, text in sorted(self.fixes.items())]
+        else:
+            lines = []
+            for line in body.split("\n"):
+                m = re.match(r"(\d+)\|.* => (.*)", line)
+                words = m.group(2).split() if m else []
+                if m and int(m.group(1)) % 8 == 3 and len(words) >= 4:
+                    lines.append(f"{m.group(1)}|{' '.join(words[:-2] + words[-1:])}")
+        text = "\n".join(lines) or "OK"
+        return Completion(text, "end_turn", inp, len(text) // 3)
 
 
 def build(api_key: str | None = None, mock: bool = False):

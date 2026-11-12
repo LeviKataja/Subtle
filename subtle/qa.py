@@ -8,11 +8,12 @@ import re
 
 from .model import Cue
 
-ERRORS = {"failed", "refused", "untranslated"}
+ERRORS = {"failed", "refused", "untranslated", "empty"}
 LABELS = {
     "failed": "Not translated: the model kept skipping this line",
     "refused": "The model declined to translate this line",
     "untranslated": "Identical to the source",
+    "empty": "No words in the translation: they probably ended up in the line next to it",
     "english": "Still looks like English",
     "fast": "Too much text for the time on screen",
     "long": "Line longer than the limit",
@@ -44,6 +45,9 @@ def check(cue: Cue, target_code: str = "", fmt: str = "srt", max_chars: int = 42
     src_flat, tr_flat = " ".join(src.split()), " ".join(tr.split())
     words = _WORD.findall(tr_flat)
     not_english = not target_code.lower().startswith("en")
+
+    if not flags and any(ch.isalnum() for ch in src) and not any(ch.isalnum() for ch in tr):
+        return ["empty"]  # a lone "." where a sentence should be; nothing else is worth measuring
 
     if not flags and not_english and src_flat.lower() == tr_flat.lower():
         src_words = _WORD.findall(src_flat)

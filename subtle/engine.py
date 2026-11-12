@@ -4,8 +4,11 @@
             -> re-ask only for the lines that came back wrong -> re-wrap -> QA flags
 
 Where the tokens go: the words of the subtitle, about two tokens of framing per line and a
-~300-token prompt per request. There is no JSON, no timing data, no model-run QA pass and no
-reasoning budget, and a hard spend cap stops a file that goes wrong.
+~300-token prompt per request. There is no JSON, no timing data and no reasoning budget, and a
+hard spend cap stops a file that goes wrong.
+
+Proofreading is a separate, optional pass (see `proofread`): the finished script is read once,
+whole, and only the lines that need correcting come back.
 """
 from __future__ import annotations
 
@@ -17,8 +20,9 @@ from typing import Callable
 from . import qa
 from .chunker import make_chunks
 from .model import Document
-from .prep import Unit, assemble, flat, prepare, ready, strip_dash, wire_text, wire_tgt
-from .prompt import PROMPT_VERSION, glossary_hits, system_prompt, user_message
+from .prep import (Unit, assemble, disassemble, flat, has_words, prepare, ready, strip_dash, wire_text,
+                   wire_tgt)
+from .prompt import PROMPT_VERSION, glossary_hits, proof_message, proof_prompt, system_prompt, user_message
 from .providers import MODELS, Cancelled, DEFAULT_MODEL, price
 from .wire import StreamParser, parse
 
@@ -140,7 +144,7 @@ class Translator:
             carry = tuple(s for s in ("refused", "failed") if any(u.state == s for u in mine))
             self.stats.failed += bool(carry)
             cue.translation = assemble(cue, plan, self.units, self.doc.fmt, o.max_chars)
-            cue.edited = False
+            cue.edited, cue.prev = False, None
             cue.flags = qa.check(cue, o.target_code, self.doc.fmt, o.max_chars, o.max_cps, carry)
         self._progress(force=True)
 
@@ -221,6 +225,16 @@ class Translator:
         user = user_message(lines, context, glossary_hits(self.opts.glossary, lines), extra)
         feed = StreamParser(len(us), lambda i, text: self._preview(us[i], text)).feed if live else None
         reply = self.provider.complete(model, self.system, user, on_text=feed, cancel=self.cancel)
+        self._spend(reply, model)
+        cut = reply.stop == "max_tokens"  # ran out of room: the last line is not to be trusted
+        got = {i: self._clean(us[i], text) for i, text in parse(reply.text, len(us), cut).items()}
+        # A line that comes back as "." had its words folded into a neighbour. Counting it as
+        # missing sends it through the same repair as a skipped line.
+        return {i: t for i, t in got.items() if t and has_words(t)}, reply.stop == "refusal"
+
+    # --- bookkeeping --------------------------------------------------------
+
+    def _spend(self, reply, model: str) -> None:
         pin, pout = price(model)
         s = self.stats
         s.requests += 1
@@ -228,11 +242,6 @@ class Translator:
         s.out += reply.out
         s.cost += (reply.inp * pin + reply.cache_read * pin * 0.1 + reply.cache_write * pin * 1.25
                    + reply.out * pout) / 1e6
-        cut = reply.stop == "max_tokens"  # ran out of room: the last line is not to be trusted
-        got = {i: self._clean(us[i], text) for i, text in parse(reply.text, len(us), cut).items()}
-        return {i: t for i, t in got.items() if t}, reply.stop == "refusal"
-
-    # --- bookkeeping --------------------------------------------------------
 
     @staticmethod
     def _dashed(u: Unit, text: str) -> str:
@@ -320,7 +329,91 @@ def retranslate(doc: Document, cue_ids: list[int], opts: Options, provider, inst
             if ready(plan, tr.units) and any(tr.units[x].kind == "text" for x in plan.units):
                 cue = doc.cues[ci]
                 cue.translation = assemble(cue, plan, tr.units, doc.fmt, opts.max_chars)
-                cue.edited = False
+                cue.edited, cue.prev = False, None
                 cue.flags = qa.check(cue, opts.target_code, doc.fmt, opts.max_chars, opts.max_cps)
                 emit({"type": "cue", "i": ci, "text": cue.translation, "flags": cue.flags})
     return tr.stats
+
+
+# --- proofreading -------------------------------------------------------------
+
+PROOF_LINES = 2000  # lines per request: an episode or a film is read in one go
+_UNDOES = {"empty", "untranslated", "english", "long", "ratio", "tags"}  # a correction may not cause these
+
+
+def _proofable(cue) -> bool:
+    return bool(cue.text.strip() and cue.translation and cue.translation.strip()) and not set(cue.flags) & qa.ERRORS
+
+
+def estimate_proof(doc: Document, opts: Options, model: str = "") -> dict:
+    """Forecast for one proofreading pass: both languages go in, only the corrections come out."""
+    model = model or opts.model
+    cues = [c for c in doc.cues if _proofable(c)]
+    n = len(cues)
+    src, tgt = sum(len(flat(c.text)) for c in cues), sum(len(flat(c.translation)) for c in cues)
+    inp = src / 3.3 + tgt / 2.2 + n * 5 + 600
+    out = (tgt / 2.2 + n * 3) * 0.1  # one line in ten rewritten
+    if MODELS.get(model, {}).get("thinks"):
+        out *= 1.2
+    pin, pout = price(model)
+    return {"lines": n, "inp": int(inp), "out": int(out), "cost": (inp * pin + out * pout) / 1e6}
+
+
+def proofread(doc: Document, opts: Options, provider, model: str = "", emit=None, cancel=None) -> tuple[Stats, dict]:
+    """Read the finished translation once more, whole, and correct only the lines that need it.
+
+    The translator works a scene at a time, so it cannot see that a term is rendered two ways an
+    hour apart, and it does not get a second look at its own slips. This pass does both. Lines
+    edited by hand are shown to the model but never changed, and a correction that breaks a local
+    check (no words, tags lost, far too long) is thrown away. Returns (stats, summary).
+    """
+    model = model or opts.model
+    emit = emit or (lambda event: None)
+    tr = Translator(doc, opts, provider, None, None, cancel)
+    listed: list[int] = []
+    for cue, plan in zip(doc.cues, tr.plans):
+        if _proofable(cue) and disassemble(cue, plan, tr.units, doc.fmt):
+            listed += [i for i in plan.units if tr.units[i].kind == "text"]
+    summary = {"model": model, "lines": len(listed), "changed": [], "dropped": 0}
+    if not listed:
+        return tr.stats, summary
+
+    system = proof_prompt(opts.target_name, opts.source_name, opts.register, opts.notes, opts.title)
+    cap = opts.budget or estimate_proof(doc, opts, model)["cost"] * 4 + 0.02
+    for ids in make_chunks(listed, tr.units, doc, PROOF_LINES, max_chars=10 ** 9):
+        if cancel and cancel():
+            raise Cancelled()
+        if tr.stats.cost > cap:
+            raise BudgetExceeded(f"Stopped proofreading at ${tr.stats.cost:.2f}: over the ${cap:.2f} cap for this file.")
+        us = [tr.units[i] for i in ids]
+        sources = [wire_text(u) for u in us]
+        user = proof_message(list(zip(sources, (wire_tgt(u) for u in us))), glossary_hits(opts.glossary, sources))
+        reply = provider.complete(model, system, user, cancel=cancel)
+        tr._spend(reply, model)
+
+        by_cue: dict[int, list[tuple[Unit, str]]] = {}
+        for j, text in parse(reply.text, len(us), reply.stop == "max_tokens").items():
+            u, text = us[j], tr._clean(us[j], text)
+            if text and text != u.tgt:
+                by_cue.setdefault(u.cue, []).append((u, text))
+        for ci, fixes in sorted(by_cue.items()):
+            cue, plan = doc.cues[ci], tr.plans[ci]
+            if cue.edited:
+                continue  # a person's wording stands
+            was = [(u, u.tgt) for u, _ in fixes]
+            for u, text in fixes:
+                u.tgt = text
+            before, cue.translation = cue.translation, assemble(cue, plan, tr.units, doc.fmt, opts.max_chars)
+            flags = qa.check(cue, opts.target_code, doc.fmt, opts.max_chars, opts.max_cps)
+            if cue.translation == before or (set(flags) - set(cue.flags)) & _UNDOES:
+                summary["dropped"] += cue.translation != before
+                cue.translation = before
+                for u, old in was:
+                    u.tgt = old
+                continue
+            original = before if cue.prev is None else cue.prev
+            cue.prev = None if cue.translation == original else original
+            cue.flags = flags
+            summary["changed"].append(ci)
+            emit({"type": "cue", "i": ci, "text": cue.translation, "flags": flags})
+    return tr.stats, summary

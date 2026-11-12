@@ -28,7 +28,7 @@ from urllib.parse import parse_qs, quote, urlparse
 from . import __version__, config, formats, media, qa
 from .arr import Arr, ArrError, Bazarr, child_of, map_path, parse_webhook
 from .cache import Cache
-from .engine import BudgetExceeded, Options, Translator, estimate, retranslate
+from .engine import BudgetExceeded, Options, Translator, estimate, estimate_proof, proofread, retranslate
 from .languages import LANGUAGES, resolve, variants
 from .model import Document
 from .prompt import clean_title
@@ -56,7 +56,9 @@ class Job:
         self.used: dict = {}  # target and model of the latest run
         self.saved_to = ""
         self.cancel = False
-        self.busy = False  # a retranslation is in flight
+        self.busy = False  # a retranslation or a proofreading pass is in flight
+        self.doing = ""  # "proofread" while that pass runs, for the label in the UI
+        self.proofed: dict = {}  # the latest proofreading pass: model, lines read, changed, dropped
         self.via = ""  # how the source was found, e.g. "Sonarr · track inside x.mkv (eng SubRip)"
         self.auto = False  # started by a webhook rather than a click
         self.ref: dict | None = None  # Sonarr/Radarr ids, for Bazarr
@@ -70,13 +72,14 @@ class Job:
                 "flagged": sum(1 for c in cues if c.flags),
                 "errors": sum(1 for c in cues if set(c.flags) & qa.ERRORS),
                 "edited": sum(1 for c in cues if c.edited), "created": self.created, "busy": self.busy,
-                "via": self.via}
+                "via": self.via, "doing": self.doing, "proofed": self.proofed,
+                "changed": sum(1 for c in cues if c.prev is not None)}
 
     def row(self, i: int) -> dict:
         c = self.doc.cues[i]
         speed = qa.cps(c)
         return {"i": i, "s": c.start, "e": c.end, "src": c.text, "tr": c.translation, "flags": c.flags,
-                "ed": c.edited, "cps": round(speed, 1) if speed is not None else None}
+                "ed": c.edited, "pv": c.prev, "cps": round(speed, 1) if speed is not None else None}
 
     def detail(self) -> dict:
         rows = [self.row(i) for i, c in enumerate(self.doc.cues) if c.text.strip()]
@@ -84,14 +87,14 @@ class Job:
 
     def to_json(self) -> dict:
         keep = ("id", "name", "src_path", "status", "error", "created", "est", "progress", "spent", "last",
-                "used", "saved_to", "via", "auto", "ref")
+                "used", "saved_to", "via", "auto", "ref", "proofed")
         return {**{k: getattr(self, k) for k in keep}, "doc": self.doc.to_json()}
 
     @classmethod
     def from_json(cls, d: dict) -> "Job":
         job = cls(d["name"], Document.from_json(d["doc"]), d.get("src_path", ""))
         for k in ("id", "status", "error", "created", "est", "progress", "spent", "last", "used", "saved_to",
-                  "via", "auto", "ref"):
+                  "via", "auto", "ref", "proofed"):
             if k in d:
                 setattr(job, k, d[k])
         if job.status in ("running", "queued"):  # the server was closed mid-run
@@ -209,7 +212,7 @@ class Manager:
                           ("chunk_lines", int), ("budget", float), ("concurrency", int),
                           ("save_next_to_source", bool), ("bilingual", bool), ("api_key", str),
                           ("bazarr_url", str), ("bazarr_wait", int), ("auto_daily_budget", float),
-                          ("setup_seen", bool), ("reach_url", str)):
+                          ("setup_seen", bool), ("reach_url", str), ("proofread", bool), ("proof_model", str)):
             if key in patch:
                 cfg[key] = kind(patch[key]) if patch[key] is not None else config.DEFAULTS[key]
         if "glossary" in patch:
@@ -228,6 +231,8 @@ class Manager:
         cfg["max_cps"] = max(8, min(cfg["max_cps"], 40))
         cfg["chunk_lines"] = max(20, min(cfg["chunk_lines"], 400))
         cfg["api_key"] = cfg["api_key"].strip()
+        if cfg["proof_model"] not in MODELS:
+            cfg["proof_model"] = ""  # "" = whichever model translated the file
         config.save(cfg)
         if "concurrency" in patch:
             self.pool = ThreadPoolExecutor(max_workers=self._workers())
@@ -528,6 +533,10 @@ class Manager:
         flagged = sum(1 for c in job.doc.cues if c.flags)
         if flagged:
             note += f", {flagged} lines to check"
+        if job.proofed:
+            note += f", proofreading changed {job.proofed['changed']}"
+        if job.error:  # translated, but something after that went wrong (proofreading, saving)
+            note += f". {job.error.rstrip('.')}"
         bazarr = self.bazarr()
         if bazarr and job.ref:
             try:
@@ -575,6 +584,12 @@ class Manager:
         try:
             tr = Translator(job.doc, opts, self.provider(), self.cache, emit, lambda: job.cancel)
             tr.run()
+            if self.cfg.get("proofread"):
+                job.doing = "proofread"
+                self._announce(job)
+                job.error = self._proof(job, opts, self.cfg.get("proof_model") or "")
+            job.last = asdict(tr.stats)
+            self._autosave(job)  # before "done" is visible: whoever sees that may look for the file
             job.status = "done"
         except Cancelled:
             job.status, job.error = "stopped", "Stopped. Start again to resume; finished parts are cached."
@@ -585,15 +600,35 @@ class Manager:
         except Exception as e:  # keep the queue alive whatever a single file does
             job.status, job.error = "error", f"{type(e).__name__}: {e}"
         finally:
-            job.cancel = False
+            job.cancel, job.doing = False, ""
             if tr:
                 job.last = asdict(tr.stats)
-            if job.status == "done":
-                self._autosave(job)
             self._save(job)
             self._announce(job)
             if job.auto:
                 self._after_auto(job)
+
+    def _proof(self, job: Job, opts: Options, model: str = "") -> str:
+        """One proofreading pass over a finished job. Returns "" or what went wrong.
+
+        A failure here never costs the translation: the file is done either way.
+        """
+        def emit(event: dict) -> None:
+            self.publish({"type": "cue", "job": job.id, "row": job.row(event["i"])})
+
+        try:
+            stats, summary = proofread(job.doc, opts, self.provider(), model, emit, lambda: job.cancel)
+        except Cancelled:
+            return "Proofreading was stopped. The translation itself is complete."
+        except (ProviderError, BudgetExceeded) as e:
+            return f"Translated, but proofreading failed: {e}"
+        except Exception as e:
+            return f"Translated, but proofreading failed: {type(e).__name__}: {e}"
+        for k in ("cost", "inp", "out", "requests"):
+            job.spent[k] += getattr(stats, k)
+        job.proofed = {"model": summary["model"], "lines": summary["lines"], "changed": len(summary["changed"]),
+                       "dropped": summary["dropped"], "cost": round(stats.cost, 6)}
+        return ""
 
     def _autosave(self, job: Job) -> None:
         """Write name.<lang>.srt beside the source, for files that were added from disk."""
@@ -616,8 +651,8 @@ class Manager:
         if job.status in ("queued", "running"):
             raise ValueError("Stop it first.")
         for cue in job.doc.cues:
-            cue.translation, cue.flags, cue.edited = None, [], False
-        job.status, job.error, job.progress, job.saved_to = "ready", "", [0, 0], ""
+            cue.translation, cue.flags, cue.edited, cue.prev = None, [], False, None
+        job.status, job.error, job.progress, job.saved_to, job.proofed = "ready", "", [0, 0], "", {}
         job.est = estimate(job.doc, self.options(job))
         self._save(job)
         self._announce(job)
@@ -647,7 +682,7 @@ class Manager:
         text = "\n".join(l.rstrip() for l in text.replace("\r", "").strip().split("\n"))
         if text != (cue.translation or ""):
             o = self.options(job, True)
-            cue.translation, cue.edited = text, True
+            cue.translation, cue.edited, cue.prev = text, True, None
             cue.flags = qa.check(cue, o.target_code, job.doc.fmt, o.max_chars, o.max_cps)
             self._save(job)
             self._autosave(job) if job.saved_to else None
@@ -660,7 +695,7 @@ class Manager:
         for i, cue in enumerate(job.doc.cues):
             if cue.edited or not cue.flags:
                 continue
-            if set(cue.flags) & {"failed", "untranslated", "english"}:
+            if set(cue.flags) & {"failed", "untranslated", "english", "empty"}:
                 again.append(i)
             elif set(cue.flags) & {"fast", "long"}:
                 shorter.append(i)
@@ -704,6 +739,57 @@ class Manager:
                 self._announce(job)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def detail(self, job: Job) -> dict:
+        """A job with its rows and, once it is translated, what proofreading it would cost per model."""
+        out = job.detail()
+        if job.status == "done":
+            opts = self.options(job, True)
+            out["proof_est"] = {m: round(estimate_proof(job.doc, opts, m)["cost"], 4) for m in MODELS}
+        return out
+
+    def proofread(self, job: Job, model: str = "") -> None:
+        """Proofread a finished job in the background; changed lines arrive as events."""
+        self._idle(job)
+        if job.status != "done":
+            raise ValueError("Translate the file first.")
+        if model and model not in MODELS:
+            raise ValueError("Unknown model.")
+        job.busy, job.doing, job.cancel = True, "proofread", False
+        self._announce(job)
+
+        def work() -> None:
+            error = ""
+            try:
+                error = self._proof(job, self.options(job, True), model or self.cfg.get("proof_model") or "")
+            finally:
+                job.busy, job.doing, job.cancel = False, "", False
+                self._save(job)
+                if job.saved_to:
+                    self._autosave(job)
+                self.publish({"type": "proofread", "id": job.id, "error": error,
+                              **({} if error else job.proofed)})
+                self._announce(job)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def unproof(self, job: Job, i: int | None = None) -> int:
+        """Put back the wording from before proofreading: one line, or all of them."""
+        self._idle(job)
+        o = self.options(job, True)
+        cues = job.doc.cues if i is None else job.doc.cues[i:i + 1]
+        n = 0
+        for cue in cues:
+            if cue.prev is not None:
+                cue.translation, cue.prev = cue.prev, None
+                cue.flags = qa.check(cue, o.target_code, job.doc.fmt, o.max_chars, o.max_cps)
+                n += 1
+        if n:
+            self._save(job)
+            if job.saved_to:
+                self._autosave(job)
+            self._announce(job)
+        return n
 
     def rendered(self, job: Job, bilingual: bool = False) -> tuple[str, str]:
         code = job.used.get("target_code") or self.cfg["target_code"] or "xx"
@@ -857,7 +943,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._attachment("subtitles.zip", buf.getvalue(), "application/zip")
             m = _JOB.match(path)
             if m and not m.group(2):
-                return mgr.get(m.group(1)).detail()
+                return mgr.detail(mgr.get(m.group(1)))
             if m and m.group(2) == "download":
                 name, text = mgr.rendered(mgr.get(m.group(1)), query.get("bilingual", ["0"])[0] == "1")
                 return self._attachment(name, text.encode("utf-8"), "text/plain")
@@ -920,6 +1006,12 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("Nothing here can be fixed automatically.")
             mgr.rework(job, again, also_condense=shorter)
             return {"again": len(again), "shorter": len(shorter)}
+        elif action == "proofread":
+            mgr.proofread(job, str(data.get("model") or ""))
+        elif action == "unproof":
+            i = int(m.group(3)) if m.group(3) is not None else None
+            n = mgr.unproof(job, i)
+            return job.row(i) if i is not None else {"restored": n}
         else:
             raise KeyError("Not found.")
         return {"ok": True}

@@ -162,6 +162,14 @@
     <label class="check"><input type="checkbox" id="saveNext"> Save each translation next to its source file (files added from a folder)</label>
     <label class="check"><input type="checkbox" id="bilingual"> Keep the original line under each translation</label>
 
+    <h3>Proofreading</h3>
+    <p class="hint">A second pass that reads the whole translation at once and corrects only the lines that need it: mistranslated idioms, grammar slips, a name or term translated two ways. The <b>Proofread</b> button on a file's review screen runs it once and shows the cost first.</p>
+    <label class="check"><input type="checkbox" id="proofAuto"> Proofread every file after it is translated</label>
+    <div class="form-grid">
+      <label for="proofModel">Read by</label>
+      <select id="proofModel"></select>
+    </div>
+
     <h3>Cache</h3>
     <div class="inline">
       <button class="btn" type="button" id="cacheClear">Clear cached translations</button>

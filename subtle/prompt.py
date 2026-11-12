@@ -68,6 +68,58 @@ def system_prompt(target: str, source: str = "English", register: str = "auto",
     return "\n".join(parts)
 
 
+def proof_prompt(target: str, source: str = "English", register: str = "auto",
+                 notes: str = "", title: str = "") -> str:
+    """The second pass: one reader sees the whole script and corrects only what needs it."""
+    parts = [
+        f"You are proofreading a {target} subtitle translation of {source} dialogue. A native {target} "
+        "speaker should not be able to tell that it was translated.",
+        "",
+        "Input is numbered lines, N|original => translation: the consecutive lines of one film or "
+        "episode. A sentence often runs over several numbers.",
+        "",
+        "Read the whole script first. Then reply with only the lines whose translation should change, "
+        "as N|corrected translation, one per line and nothing else: no notes, no reasons, no code fences. "
+        "Leave out every line that is fine. If nothing needs changing, reply with the single word OK.",
+        "",
+        "Correct a line when:",
+        "- it gets the meaning wrong: an idiom, sarcasm or figure of speech translated word for word, "
+        "or the wrong tense, person or negation;",
+        f"- it is not grammatical, natural spoken {target}: a wrong inflection or agreement, a word order "
+        f"copied from {source}, a misspelling;",
+        "- it disagrees with the rest of the script: a recurring name, term or thing translated in "
+        "different ways, or characters switching between formal and informal address for no reason. "
+        "Choose the best rendering and use it everywhere;",
+        "- a sentence that runs over several numbers does not read as one sentence, or words that belong "
+        "to one number ended up in its neighbour.",
+        "",
+        "Rules:",
+        "- Leave a correct line alone. Do not rephrase for taste.",
+        "- Subtitles are read fast: a correction is no longer than the line it replaces unless the "
+        "meaning requires it.",
+        "- Each number carries the part of the sentence its original carries. Never merge lines or "
+        "leave one empty.",
+        "- Keep names, numbers, a leading \"- \" (new speaker), tags such as <i>…</i> and symbols such "
+        "as ♪ where they are.",
+        "- Do not censor, soften, explain or add anything.",
+    ]
+    if register in _REGISTER:
+        parts.append(_REGISTER[register])
+    if title:
+        parts += ["", f"Work: {title}"]
+    if notes.strip():
+        parts += ["", f"Notes from the user: {notes.strip()}"]
+    return "\n".join(parts)
+
+
+def proof_message(pairs: list[tuple[str, str]], glossary: list[tuple[str, str]] | None = None) -> str:
+    parts = []
+    if glossary:
+        parts.append("Glossary (always use these):\n" + "\n".join(f"{s} = {t}" for s, t in glossary))
+    parts.append("Proofread:\n" + encode([f"{s} => {t}" for s, t in pairs]))
+    return "\n\n".join(parts)
+
+
 def glossary_hits(glossary: list, lines: list[str]) -> list[tuple[str, str]]:
     """Only the entries that actually occur in this request, so a long glossary costs nothing."""
     text = "\n".join(lines)

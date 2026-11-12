@@ -8,8 +8,9 @@ const S = {
 };
 const SHORT = {
   failed: 'not translated', refused: 'declined', untranslated: 'same as source', english: 'English?',
-  fast: 'too fast', long: 'long line', ratio: 'length', tags: 'tags',
+  fast: 'too fast', long: 'long line', ratio: 'length', tags: 'tags', empty: 'no words',
 };
+const FIXABLE = ['failed', 'untranslated', 'english', 'empty', 'fast', 'long'];
 
 // ── small helpers ──────────────────────────────────────────────────────────
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -131,7 +132,8 @@ function jobRow(j) {
   const [done, total] = j.progress;
   const pct = total ? Math.round(100 * done / total) : 0;
   const sub = el('div', { class: 'job-sub' });
-  if (j.status === 'running' && S.ticker[j.id]) sub.append(el('span', { class: 'live', text: S.ticker[j.id] }));
+  if (j.doing === 'proofread') sub.append(el('span', { class: 'live', text: 'Proofreading the whole translation…' }));
+  else if (j.status === 'running' && S.ticker[j.id]) sub.append(el('span', { class: 'live', text: S.ticker[j.id] }));
   else if (j.error) sub.append(el('span', { class: 'bad', text: j.error }));
   else {
     const bits = [plural(j.cues, 'line')];
@@ -139,6 +141,7 @@ function jobRow(j) {
     if (j.used.target_name) bits.push(`${j.used.target_name}, ${modelLabel(j.used.model)}`);
     sub.append(bits.join(' · '));
     if (j.status === 'done' && j.flagged) sub.append(' · ', el('span', { class: 'amber', text: `${j.flagged} to check` }));
+    if (j.status === 'done' && j.proofed.model) sub.append(` · proofread, ${j.changed} changed`);
     if (j.saved_to) sub.append(' · saved next to the source');
   }
 
@@ -240,13 +243,22 @@ function renderReviewHead() {
   const d = S.detail, [done, total] = d.progress;
   $('#rvName').textContent = d.name;
   const chips = [el('span', { class: 'chip', text: plural(d.rows.length, 'line') })];
-  if (d.status === 'running') chips.push(el('span', { class: 'chip green', text: `Translating… ${total ? Math.round(100 * done / total) : 0}%` }));
+  const proofing = d.doing === 'proofread';
+  if (proofing) chips.push(el('span', { class: 'chip green', text: 'Proofreading…' }));
+  else if (d.status === 'running') chips.push(el('span', { class: 'chip green', text: `Translating… ${total ? Math.round(100 * done / total) : 0}%` }));
   if (d.status === 'queued') chips.push(el('span', { class: 'chip', text: 'Waiting in the queue' }));
   if (d.used.target_name) chips.push(el('span', { class: 'chip', text: `${d.used.target_name} · ${modelLabel(d.used.model)}` }));
   if (d.errors) chips.push(el('span', { class: 'chip red', text: `${d.errors} not translated` }));
   if (d.flagged - d.errors > 0) chips.push(el('span', { class: 'chip amber', text: `${d.flagged - d.errors} to check` }));
   if (d.spent.requests) chips.push(el('span', { class: 'chip', title: `${plural(d.spent.requests, 'request')}`, text: `${money(d.spent.cost)} · ${tokens(d.spent.inp + d.spent.out)} tokens` }));
-  if (d.busy) chips.push(el('span', { class: 'chip green', text: 'Reworking lines…' }));
+  if (d.proofed.model && !proofing) {
+    const p = d.proofed;
+    chips.push(el('span', {
+      class: 'chip', text: `Proofread by ${modelLabel(p.model)} · ${d.changed} changed`,
+      title: `${plural(p.lines, 'line')} read for ${money(p.cost)}.` + (p.dropped ? ` ${plural(p.dropped, 'correction')} discarded for breaking a check.` : ''),
+    }));
+  }
+  if (d.busy && !proofing) chips.push(el('span', { class: 'chip green', text: 'Reworking lines…' }));
   $('#rvChips').replaceChildren(...chips);
 
   const note = $('#rvNote');
@@ -259,8 +271,14 @@ function renderReviewHead() {
   if (startable(d)) actions.push(btn(d.status === 'ready' ? 'Translate' : 'Resume', () => api(`/api/jobs/${d.id}/start`, {}), 'primary'));
   if (active(d)) actions.push(btn('Stop', () => api(`/api/jobs/${d.id}/cancel`, {})));
   if (d.status === 'done') {
-    const fixable = d.rows.filter(r => !r.ed && r.flags.some(f => ['failed', 'untranslated', 'english', 'fast', 'long'].includes(f))).length;
+    const fixable = d.rows.filter(r => !r.ed && r.flags.some(f => FIXABLE.includes(f))).length;
     if (fixable && !d.busy) actions.push(btn(`Fix ${plural(fixable, 'flagged line')}`, fixFlagged, '', 'Sends only these lines back: untranslated ones are redone, long or fast ones are shortened'));
+    if (S.filter === 'proofed' && d.changed && !d.busy) actions.push(btn(`Undo all ${d.changed}`, undoProofread, '', 'Put back the wording from before proofreading on every line'));
+    if (!d.busy) actions.push(el('button', {
+      class: 'btn', text: d.proofed.model ? 'Proofread again' : 'Proofread', 'aria-haspopup': 'menu',
+      title: 'Read the whole translation once more and correct only the lines that need it',
+      onclick: e => { e.stopPropagation(); proofMenu(e.currentTarget); },
+    }));
     actions.push(btn('Start over', startOver, 'ghost', 'Translate the whole file again with the current settings'));
     actions.push(btn('Download', () => download(d), 'primary'));
   }
@@ -268,7 +286,10 @@ function renderReviewHead() {
   $('#followWrap').hidden = d.status !== 'running';
 
   const count = f => d.rows.filter(r => matches(r, f, '')).length;
-  $('#rvTabs').replaceChildren(...[['all', 'All'], ['flagged', 'To check'], ['edited', 'Edited']].map(([key, label]) =>
+  const tabs = [['all', 'All'], ['flagged', 'To check'], ['edited', 'Edited']];
+  if (d.proofed.model || d.changed) tabs.splice(2, 0, ['proofed', 'Proofread']);
+  else if (S.filter === 'proofed') S.filter = 'all';
+  $('#rvTabs').replaceChildren(...tabs.map(([key, label]) =>
     el('button', { role: 'tab', 'aria-selected': String(S.filter === key), onclick: () => { S.filter = key; renderReviewHead(); applyFilter(); } },
       label, el('span', { text: count(key) }))));
 }
@@ -276,6 +297,33 @@ function renderReviewHead() {
 async function fixFlagged() {
   const r = await api(`/api/jobs/${S.detail.id}/fix`, {});
   toast(`Reworking ${plural(r.again + r.shorter, 'line')}…`);
+}
+
+function proofMenu(anchor) {
+  const open = $('.menu');
+  if (open) return open.remove();
+  const d = S.detail, est = d.proof_est || {};
+  const close = e => { if (!e || !menu.contains(e.target)) { menu.remove(); document.removeEventListener('click', close); } };
+  const pick = guard(async id => {
+    close();
+    await api(`/api/jobs/${d.id}/proofread`, { model: id });
+  });
+  const menu = el('div', { class: 'menu', role: 'menu', onkeydown: e => { if (e.key === 'Escape') { close(); anchor.focus(); } } },
+    el('div', { class: 'menu-head', text: 'Which model should read it?' }),
+    S.models.map(m => el('button', { type: 'button', role: 'menuitem', onclick: () => pick(m.id) },
+      el('span', { text: m.label + (m.id === d.used.model ? ' · translated this file' : '') }),
+      el('small', { text: `about ${money(est[m.id] || 0)}` }))));
+  anchor.after(menu);
+  $('button', menu).focus();
+  document.addEventListener('click', close);
+}
+
+async function undoProofread() {
+  const d = S.detail;
+  const r = await api(`/api/jobs/${d.id}/unproof`, {});
+  S.detail = await api('/api/jobs/' + d.id);
+  renderReview();
+  toast(`Put back ${plural(r.restored, 'line')}.`);
 }
 
 async function startOver() {
@@ -288,6 +336,7 @@ async function startOver() {
 function matches(r, filter, query) {
   if (filter === 'flagged' && !r.flags.length) return false;
   if (filter === 'edited' && !r.ed) return false;
+  if (filter === 'proofed' && r.pv == null) return false;
   if (!query) return true;
   return r.src.toLowerCase().includes(query) || (r.tr || '').toLowerCase().includes(query);
 }
@@ -325,7 +374,8 @@ function cueRow(r) {
   const dur = r.s != null ? `${clock(r.s, true)} → ${clock(r.e, true)}  (${((r.e - r.s) / 1000).toFixed(1)} s)` : '';
   const row = el('div', { class: rowClass(r), 'data-i': r.i },
     el('div', { class: 'n', text: r.i + 1 }), el('div', { class: 't', text: clock(r.s), title: dur }),
-    el('div', { class: 'src', text: r.src }), cell, meta);
+    el('div', { class: 'src', text: r.src }), cell, meta,
+    r.pv != null && el('div', { class: 'was', text: r.pv, title: 'The wording before proofreading' }));
   return row;
 }
 
@@ -338,6 +388,13 @@ function fillMeta(meta, r) {
   const kids = [];
   if (r.cps != null) kids.push(el('span', { class: 'cps' + (r.flags.includes('fast') ? ' over' : ''), text: `${Math.round(r.cps)} cps`, title: 'Characters per second' }));
   if (r.ed) kids.push(el('span', { class: 'badge plain', text: 'edited' }));
+  if (r.pv != null) {
+    kids.push(el('span', { class: 'badge plain', text: 'proofread' }));
+    if (!active(S.detail) && !S.detail.busy) kids.push(el('button', {
+      class: 'redo', text: '↶', title: 'Put back the earlier wording', 'aria-label': 'Put back the earlier wording',
+      onclick: guard(async () => updateRow(await api(`/api/jobs/${S.detail.id}/unproof/${r.i}`, {}))),
+    }));
+  }
   for (const f of r.flags) kids.push(el('span', { class: 'badge' + (S.errors.includes(f) ? ' red' : ''), text: SHORT[f] || f, title: S.labels[f] || '' }));
   if (!active(S.detail) && r.tr != null && S.detail.status !== 'ready') {
     kids.push(el('button', { class: 'redo', text: '↻', title: 'Translate this line again', 'aria-label': 'Translate this line again', onclick: () => toggleRedo(r) }));
@@ -423,6 +480,11 @@ function onEvent(ev) {
     for (const i of ev.cues) S.rowEls.get(i)?.classList.remove('busy');
     if (ev.error) toast(ev.error, true);
   }
+  if (ev.type === 'proofread' && S.open === ev.id) {
+    if (ev.error) return toast(ev.error, true);
+    toast(ev.changed ? `Proofreading changed ${plural(ev.changed, 'line')}. They are under the Proofread tab.`
+      : 'Proofreading found nothing to change.');
+  }
 }
 
 function connect() {
@@ -457,6 +519,10 @@ function openSettings() {
   $('#maxCps').value = c.max_cps;
   $('#saveNext').checked = c.save_next_to_source;
   $('#bilingual').checked = c.bilingual;
+  $('#proofAuto').checked = c.proofread;
+  $('#proofModel').replaceChildren(el('option', { value: '', text: 'The model that translated the file' }),
+    ...S.models.map(m => el('option', { value: m.id, text: m.label })));
+  $('#proofModel').value = c.proof_model;
   $('#about').textContent = `Subtle ${S.version} · settings, cache and queue live in ${S.home}`;
   $('#settingsDlg').showModal();
 }
@@ -778,6 +844,7 @@ function bind() {
     budget: +$('#budget').value || 0, escalate_model: $('#escalate').value, chunk_lines: +$('#chunk').value || 120,
     concurrency: +$('#conc').value || 3, max_chars: +$('#maxChars').value || 42, max_cps: +$('#maxCps').value || 21,
     save_next_to_source: $('#saveNext').checked, bilingual: $('#bilingual').checked,
+    proofread: $('#proofAuto').checked, proof_model: $('#proofModel').value,
   }));
 
   let depth = 0;

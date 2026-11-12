@@ -49,6 +49,11 @@ def has_letters(text: str) -> bool:
     return any(ch.isalpha() for ch in _TAG.sub("", text))
 
 
+def has_words(text: str) -> bool:
+    """Letters or digits: "3." counts, "." and "..." do not."""
+    return any(ch.isalnum() for ch in _TAG.sub("", text))
+
+
 def wire_text(u: Unit) -> str:
     return ("- " if u.dash else "") + u.src
 
@@ -190,6 +195,35 @@ def assemble(cue: Cue, plan: Plan, units: list[Unit], fmt: str, max_chars: int =
     for o, c in reversed(plan.wraps):
         lines = [o + l + c for l in lines]
     return plan.prefix + "\n".join(lines)
+
+
+def disassemble(cue: Cue, plan: Plan, units: list[Unit], fmt: str) -> bool:
+    """The reverse of assemble: put a cue's current translation back on its units.
+
+    False when there is nothing to work with, or when the cue no longer has the shape its
+    plan expects (a hand edit that added or removed a speaker's line).
+    """
+    mine = [units[i] for i in plan.units]
+    text = cue.translation
+    if plan.raw or plan.drop or not text or not text.strip() or not any(u.kind == "text" for u in mine):
+        return False
+    if fmt == "txt":
+        mine[0].tgt = text.strip()
+        return True
+    if plan.prefix and text.startswith(plan.prefix):
+        text = text[len(plan.prefix):]
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    for o, c in plan.wraps:  # outermost first
+        if all(l.startswith(o) and l.endswith(c) and len(l) >= len(o) + len(c) for l in lines):
+            lines = [l[len(o):len(l) - len(c)].strip() for l in lines]
+    if len(mine) == 1:
+        lines = [" ".join(lines)]
+    if len(lines) != len(mine):
+        return False
+    for u, line in zip(mine, lines):
+        if u.kind == "text":
+            u.tgt = strip_dash(line).strip() if u.dash else line
+    return all(u.tgt for u in mine if u.kind == "text")
 
 
 def flat(text: str) -> str:

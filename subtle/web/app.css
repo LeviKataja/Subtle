@@ -165,7 +165,19 @@ body.dragging .drop { border-color: var(--accent); background: var(--accent-soft
 .chip.amber { background: var(--warn-soft); color: var(--warn); }
 .chip.red { background: var(--err-soft); color: var(--err); }
 .chip.green { background: var(--accent-soft); color: var(--accent); }
-.rv-actions { display: flex; gap: 6px; }
+.rv-actions { display: flex; gap: 6px; position: relative; }
+.menu {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 30; min-width: 280px; padding: 6px;
+  background: var(--panel); border: 1px solid var(--line2); border-radius: 10px; box-shadow: var(--shadow);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.menu-head { font-size: 12px; color: var(--muted); padding: 4px 8px 6px; }
+.menu button {
+  font: inherit; color: var(--text); background: transparent; border: 0; border-radius: 7px; padding: 7px 8px;
+  display: flex; justify-content: space-between; gap: 16px; cursor: pointer; text-align: left;
+}
+.menu button:hover, .menu button:focus-visible { background: var(--panel2); }
+.menu button small { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .rv-note { margin-top: 10px; padding: 9px 12px; border-radius: 9px; background: var(--panel2); color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
 .rv-note.bad { background: var(--err-soft); color: var(--err); }
 .rv-bar { display: flex; align-items: center; gap: 12px; margin: 16px 0 10px; }
@@ -208,6 +220,7 @@ body.dragging .drop { border-color: var(--accent); background: var(--accent-soft
 .redo { opacity: .3; font: inherit; border: 0; background: transparent; color: var(--muted); cursor: pointer; border-radius: 6px; padding: 0 6px; font-size: 15px; line-height: 20px; }
 .row:hover .redo, .redo:focus-visible { opacity: 1; }
 .redo:hover { background: var(--panel2); color: var(--text); }
+.row .was { grid-column: 4; color: var(--faint); text-decoration: line-through; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; padding-top: 2px; }
 .redo-form { grid-column: 3 / -1; display: flex; gap: 6px; margin-top: 7px; }
 .redo-form input { flex: 1; }
 .empty { text-align: center; color: var(--muted); padding: 40px 0; }

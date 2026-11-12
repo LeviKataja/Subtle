@@ -12,6 +12,19 @@ EXTENSIONS = (".srt", ".vtt", ".ass", ".ssa", ".txt")
 
 _TS = r"(?:(\d+):)?(\d{1,2}):(\d{2})[,.](\d{1,3})"
 _TIMING = re.compile(rf"^\s*{_TS}\s*-->\s*{_TS}(.*)$")
+_SETTING = re.compile(r"^[A-Za-z][\w-]*:\S+$")  # X1:117, line:0, position:20%
+
+
+def _tail(rest: str) -> tuple[str, str]:
+    """What follows the timing on its line -> (position settings, subtitle text).
+
+    Normally that is nothing or a few settings. Some files have the text itself there, and it
+    must not be mistaken for settings: the line would vanish from the translation.
+    """
+    rest = rest.strip()
+    if not rest or all(_SETTING.match(word) for word in rest.split()):
+        return rest, ""
+    return "", rest
 
 
 def decode(data: bytes) -> str:
@@ -82,7 +95,10 @@ def parse_srt(text: str) -> Document:
         if m:
             close(True)
             g = m.groups()
-            cur = Cue(_ms(*g[0:4]), _ms(*g[4:8]), "", {"tail": g[8].strip()})
+            tail, text_here = _tail(g[8])
+            cur = Cue(_ms(*g[0:4]), _ms(*g[4:8]), "", {"tail": tail})
+            if text_here:
+                buf.append(text_here)
         else:
             buf.append(line)
     close(False)
@@ -116,9 +132,10 @@ def parse_vtt(text: str) -> Document:
             items.append(["raw", block])
             continue
         g = _TIMING.match(lines[ti]).groups()
-        body = "\n".join(l.strip() for l in lines[ti + 1:] if l.strip())
+        tail, text_here = _tail(g[8])
+        body = "\n".join(l.strip() for l in [text_here] + lines[ti + 1:] if l.strip())
         cues.append(Cue(_ms(*g[0:4]), _ms(*g[4:8]), body,
-                        {"id": lines[0] if ti == 1 else "", "tail": g[8].strip()}))
+                        {"id": lines[0] if ti == 1 else "", "tail": tail}))
         items.append(["cue", len(cues) - 1])
     return Document("vtt", cues, header, {"items": items})
 

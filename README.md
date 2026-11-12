@@ -11,11 +11,13 @@ Finnish in them was prepared for the demo file; it is not output from a live tra
 
 ## Status
 
-Early, and not yet run against the live Claude API. What has and has not been tried:
+Early. One live run so far; everything else has only met the built-in fake model. What has and
+has not been tried:
 
 | Part | State |
 |---|---|
-| Translating, repair, the web UI | Covered by the tests and tried by hand, but only with the built-in fake model. The costs below are estimates, and translation quality is unproven. |
+| Translating, the web UI | Covered by the tests and tried by hand. One live run: a 96-minute film, 936 lines, English to Finnish on Haiku 5.5, for $0.014 and 45k tokens. A native speaker called the result good enough to watch, with some lines that read oddly. Other languages and models are untried. |
+| Repair, proofreading | Covered by the tests, but only with the fake model. What proofreading catches, and what it costs, is unmeasured. |
 | Subtitles inside video files | Tried with real ffmpeg on MKV and MP4 files. Picture-based tracks only with stand-in data. |
 | Sonarr, Radarr, Bazarr | Written against their source and tested against stand-ins. Not tried with real instances. |
 | Dockerfile | Never built. |
@@ -59,7 +61,8 @@ python -m subtle estimate episode.en.srt --to fi --model sonnet
 Folders are searched recursively. Output lands next to each source as `name.<lang>.srt`
 (`Show.S01E01.en.srt` becomes `Show.S01E01.fi.srt`), which is what Jellyfin and Plex pick up.
 Existing translations are skipped unless you pass `--force`. `--help` lists the rest
-(`--model`, `--sdh strip`, `--register`, `--notes`, `--bilingual`, `--budget`, `--out`).
+(`--model`, `--sdh strip`, `--register`, `--notes`, `--bilingual`, `--budget`, `--out`,
+`--proofread`, `--proofread-model sonnet`).
 
 ## Why it is cheap
 
@@ -69,13 +72,13 @@ Existing translations are skipped unless you pass `--force`. `--help` lists the 
 | Prompt | Roughly 300 tokens, sent once per ~120 lines. |
 | Free work | Tags, positions, line breaks, music symbols, number-only lines and (optionally) sound descriptions are handled locally and never sent. |
 | Model | Haiku 5.5 with reasoning switched off. Sonnet and Opus are one click away and run at low effort. |
-| Checking | Done locally: every line number must come back, plus reading speed, line length, leftover English and tag checks. No second model pass. |
+| Checking | Done locally: every line number must come back with words in it, plus reading speed, line length, leftover English and tag checks. A second model pass exists but is optional (see Proofreading). |
 | Repair | Only the lines that came back wrong are re-sent, with a neighbour either side. Requests are capped per chunk. |
 | Cache | A finished chunk is never paid for twice: stop, resume, re-run or change one glossary entry and only the affected chunks are sent. |
 | Spend cap | Each file stops at four times its estimate (or a dollar figure you set). |
 
-Estimates for a 45-minute episode of about 700 lines, from the built-in estimator (not measured
-against the live API):
+Estimates for a 45-minute episode of about 700 lines, from the built-in estimator. The one live
+run (see Status) cost about a fifth more than its estimate:
 
 | Model | Per episode |
 |---|---|
@@ -84,6 +87,25 @@ against the live API):
 | Opus 5.5 | about $0.40 |
 
 The UI shows the estimate before you start and the real token counts and cost as it runs.
+
+## Proofreading
+
+The translator works a scene at a time, so it cannot notice that it called the same thing by two
+different words an hour apart, and it never gets a second look at its own slips. **Proofread** on
+a file's review screen sends the whole translation, original beside it, in one request, and gets
+back only the lines that should change: an idiom translated word for word, a wrong inflection, a
+term that changed half way through.
+
+- You choose which model reads, and see the estimate before it starts. Reading is cheap next to
+  translating, because nearly all of it is input: for the film in Status, an estimated half a
+  cent with Haiku, or ten cents with Sonnet reading a Haiku translation.
+- A model reading its own work catches less than a stronger one. If a translation reads oddly
+  throughout, translating with the stronger model is the surer fix.
+- Changed lines are listed under their own tab with the earlier wording shown beneath, and one
+  click puts a line back, or all of them.
+- Lines you edited yourself are never changed. A correction that loses the words, the tags or
+  the line limit is thrown away.
+- Settings can run it after every translation, which also covers automatic ones.
 
 ## What the UI does
 
@@ -110,7 +132,7 @@ subtle/
   wire.py       the N|text format and its tolerant parser
   chunker.py    split at scene changes
   prompt.py     the whole prompt
-  engine.py     translate, repair, budget cap, retranslate
+  engine.py     translate, repair, budget cap, retranslate, proofread
   qa.py         local quality flags
   wrap.py       line breaking
   media.py      subtitles for a video: sidecar file, or a track pulled out with ffmpeg

@@ -14,14 +14,16 @@ class Cue:
     translation: str | None = None  # assembled output text, lines separated by \n
     flags: list[str] = field(default_factory=list)
     edited: bool = False
+    prev: str | None = None  # the wording before proofreading changed it
 
     def to_json(self) -> dict:
         return {"s": self.start, "e": self.end, "t": self.text, "m": self.meta,
-                "tr": self.translation, "f": self.flags, "ed": self.edited}
+                "tr": self.translation, "f": self.flags, "ed": self.edited, "pv": self.prev}
 
     @classmethod
     def from_json(cls, d: dict) -> "Cue":
-        return cls(d["s"], d["e"], d["t"], d.get("m") or {}, d.get("tr"), d.get("f") or [], bool(d.get("ed")))
+        return cls(d["s"], d["e"], d["t"], d.get("m") or {}, d.get("tr"), d.get("f") or [], bool(d.get("ed")),
+                   d.get("pv"))
 
 
 @dataclass

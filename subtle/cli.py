@@ -14,7 +14,7 @@ from pathlib import Path
 
 from . import __version__, config, formats, media
 from .cache import Cache
-from .engine import BudgetExceeded, Options, Stats, Translator, estimate
+from .engine import BudgetExceeded, Options, Stats, Translator, estimate, proofread
 from .languages import resolve, variants
 from .prompt import clean_title
 from .providers import ALIASES, MODELS, Cancelled, ProviderError, build
@@ -145,13 +145,25 @@ def cmd_translate(args) -> int:
             if fatal:
                 return 1
             continue
+        proofed = ""
+        if args.proofread or args.proofread_model or cfg.get("proofread"):
+            reader = ALIASES.get(args.proofread_model, args.proofread_model) or cfg.get("proof_model") or ""
+            try:
+                extra, summary = proofread(doc, opts, provider, reader)
+                total.add(extra)
+                stats.add(extra)
+                proofed = f", proofreading changed {len(summary['changed'])}"
+            except KeyboardInterrupt:
+                proofed = ", proofreading interrupted"
+            except (BudgetExceeded, ProviderError, Cancelled) as e:
+                proofed = f", proofreading failed ({e})"  # the translation is still written
         out_dir.mkdir(parents=True, exist_ok=True)
         out.write_text(formats.render(doc, args.bilingual), "utf-8")
         written += 1
         flagged = sum(1 for c in doc.cues if c.flags)
         note = f", {flagged} flagged" if flagged else ""
         cached = f", {stats.cached} from cache" if stats.cached else ""
-        print(f"\r  {path.name} -> {out.name}: {stats.units} lines{note}{cached}, "
+        print(f"\r  {path.name} -> {out.name}: {stats.units} lines{note}{cached}{proofed}, "
               f"{stats.inp + stats.out:,} tokens, {money(stats.cost)}, {time.time() - started:.1f}s")
     if dry:
         print(f"Estimated total: ~{money(est_total)}")
@@ -204,10 +216,15 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--dry-run", action="store_true", help="only show the estimate")
             p.add_argument("--bilingual", action="store_true", help="keep the original line under each translation")
             p.add_argument("--budget", type=float, help="stop a file once it has cost this many dollars")
+            p.add_argument("--proofread", action="store_true",
+                           help="read each finished translation once more and correct the lines that need it")
+            p.add_argument("--proofread-model", default="", metavar="MODEL",
+                           help="proofread with this model instead of the one that translated (implies --proofread)")
             p.add_argument("--no-cache", action="store_true")
             p.add_argument("--mock", action="store_true", help="fake translations, for trying things out")
         else:
-            p.set_defaults(dry_run=True, force=False, bilingual=False, mock=False, no_cache=True)
+            p.set_defaults(dry_run=True, force=False, bilingual=False, mock=False, no_cache=True,
+                           proofread=False, proofread_model="")
 
     cache = sub.add_parser("cache", help="manage cached translations")
     cache.add_argument("action", choices=("clear",))
