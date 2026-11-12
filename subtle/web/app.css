@@ -167,16 +167,20 @@ body.dragging .drop { border-color: var(--accent); background: var(--accent-soft
 .chip.green { background: var(--accent-soft); color: var(--accent); }
 .rv-actions { display: flex; gap: 6px; position: relative; }
 .menu {
-  position: absolute; top: calc(100% + 6px); right: 0; z-index: 30; min-width: 280px; padding: 6px;
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 30; width: min(360px, calc(100vw - 32px)); padding: 6px;
   background: var(--panel); border: 1px solid var(--line2); border-radius: 10px; box-shadow: var(--shadow);
   display: flex; flex-direction: column; gap: 2px;
 }
 .menu-head { font-size: 12px; color: var(--muted); padding: 4px 8px 6px; }
 .menu button {
   font: inherit; color: var(--text); background: transparent; border: 0; border-radius: 7px; padding: 7px 8px;
-  display: flex; justify-content: space-between; gap: 16px; cursor: pointer; text-align: left;
+  display: block; cursor: pointer; text-align: left;
 }
 .menu button:hover, .menu button:focus-visible { background: var(--panel2); }
+.menu-row { display: flex; justify-content: space-between; gap: 16px; }
+.menu-row b { color: var(--accent); font-weight: 600; }
+.menu-note { font-size: 12px; line-height: 1.35; color: var(--muted); margin-top: 2px; }
+.menu button.weak .menu-row span { color: var(--muted); }
 .menu button small { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .rv-note { margin-top: 10px; padding: 9px 12px; border-radius: 9px; background: var(--panel2); color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
 .rv-note.bad { background: var(--err-soft); color: var(--err); }

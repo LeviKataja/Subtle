@@ -299,6 +299,22 @@ async function fixFlagged() {
   toast(`Reworking ${plural(r.again + r.shorter, 'line')}…`);
 }
 
+// How well a model suits proofreading what another one translated. A reader corrects what it can
+// tell is wrong, so the useful direction is a stronger model reading a weaker one's work.
+function readerFit(reader, translator) {
+  const rank = id => [...S.models].sort((a, b) => a.inp - b.inp).findIndex(m => m.id === id);
+  const r = rank(reader), t = rank(translator);
+  if (r < 0 || t < 0) return { kind: '', note: '' };
+  const top = t === S.models.length - 1;
+  if (r < t) return { kind: 'weak', note: 'Weaker than the model that translated this file: it can undo good lines. Not recommended.' };
+  if (r === t) return {
+    kind: top ? 'best' : '',
+    note: 'The model that translated this file, reading its own work: catches slips and inconsistency, tends to miss what it misunderstood.',
+  };
+  if (r === t + 1) return { kind: 'best', note: 'A stronger reader also catches what the translator misunderstood.' };
+  return { kind: '', note: 'Stronger still, at a higher price.' };
+}
+
 function proofMenu(anchor) {
   const open = $('.menu');
   if (open) return open.remove();
@@ -310,9 +326,14 @@ function proofMenu(anchor) {
   });
   const menu = el('div', { class: 'menu', role: 'menu', onkeydown: e => { if (e.key === 'Escape') { close(); anchor.focus(); } } },
     el('div', { class: 'menu-head', text: 'Which model should read it?' }),
-    S.models.map(m => el('button', { type: 'button', role: 'menuitem', onclick: () => pick(m.id) },
-      el('span', { text: m.label + (m.id === d.used.model ? ' · translated this file' : '') }),
-      el('small', { text: `about ${money(est[m.id] || 0)}` }))));
+    S.models.map(m => {
+      const fit = readerFit(m.id, d.used.model);
+      return el('button', { type: 'button', role: 'menuitem', class: fit.kind, onclick: () => pick(m.id) },
+        el('div', { class: 'menu-row' },
+          el('span', {}, m.label, fit.kind === 'best' && el('b', { text: ' · recommended' })),
+          el('small', { text: `about ${money(est[m.id] || 0)}` })),
+        fit.note && el('div', { class: 'menu-note', text: fit.note }));
+    }));
   anchor.after(menu);
   $('button', menu).focus();
   document.addEventListener('click', close);

@@ -11,13 +11,14 @@ Finnish in them was prepared for the demo file; it is not output from a live tra
 
 ## Status
 
-Early. One live run so far; everything else has only met the built-in fake model. What has and
-has not been tried:
+Early. Two films have been translated and one proofread against the live API, all English to
+Finnish; everything else has only met the built-in fake model. What has and has not been tried:
 
 | Part | State |
 |---|---|
-| Translating, the web UI | Covered by the tests and tried by hand. One live run: a 96-minute film, 936 lines, English to Finnish on Haiku 5.5, for $0.014 and 45k tokens. A native speaker called the result good enough to watch, with some lines that read oddly. Other languages and models are untried. |
-| Repair, proofreading | Covered by the tests, but only with the fake model. What proofreading catches, and what it costs, is unmeasured. |
+| Translating, the web UI | Covered by the tests and tried by hand. Two live runs on Haiku 5.5: a 936-line film for $0.014, and a fast-talking 1,878-line one for about 5 cents. A native speaker called the first good enough to watch, with some lines that read oddly. Other languages and models are untried. |
+| Proofreading | Covered by the tests. One live run: Sonnet 5.5 reading the 1,878-line translation changed 44 lines for about 21 cents. Whether those were the right 44 has not been judged yet. |
+| Repair | Covered by the tests. Not looked at in the live runs. |
 | Subtitles inside video files | Tried with real ffmpeg on MKV and MP4 files. Picture-based tracks only with stand-in data. |
 | Sonarr, Radarr, Bazarr | Written against their source and tested against stand-ins. Not tried with real instances. |
 | Dockerfile | Never built. |
@@ -77,8 +78,9 @@ Existing translations are skipped unless you pass `--force`. `--help` lists the 
 | Cache | A finished chunk is never paid for twice: stop, resume, re-run or change one glossary entry and only the affected chunks are sent. |
 | Spend cap | Each file stops at four times its estimate (or a dollar figure you set). |
 
-Estimates for a 45-minute episode of about 700 lines, from the built-in estimator. The one live
-run (see Status) cost about a fifth more than its estimate:
+Estimates for a 45-minute episode of about 700 lines, from the built-in estimator. Both live
+translations (see Status) cost more than estimated: a fifth more for one film, and between one
+and a half times and double for the other:
 
 | Model | Per episode |
 |---|---|
@@ -96,16 +98,35 @@ a file's review screen sends the whole translation, original beside it, in one r
 back only the lines that should change: an idiom translated word for word, a wrong inflection, a
 term that changed half way through.
 
-- You choose which model reads, and see the estimate before it starts. Reading is cheap next to
-  translating, because nearly all of it is input: for the film in Status, an estimated half a
-  cent with Haiku, or ten cents with Sonnet reading a Haiku translation.
+- You choose which model reads, and see the estimate before it starts. Reading costs less than
+  translating with the same model, because nearly all of it is input. A stronger reader still
+  costs more than a cheap translator: in the one live run, Sonnet reading the 1,878-line film
+  cost about 21 cents (the estimate said 22), four times what Haiku had cost to translate it.
 - A model reading its own work catches less than a stronger one. If a translation reads oddly
-  throughout, translating with the stronger model is the surer fix.
+  throughout, translating with the stronger model is the surer fix. See the table below.
 - Changed lines are listed under their own tab with the earlier wording shown beneath, and one
   click puts a line back, or all of them.
 - Lines you edited yourself are never changed. A correction that loses the words, the tags or
   the line limit is thrown away.
 - Settings can run it after every translation, which also covers automatic ones.
+
+Which model translates and which one reads, for the 936-line film in Status. The costs in the
+table are estimates, and the order of quality is what to expect, not something measured yet:
+
+| Translated by | Read by | Cost | |
+|---|---|---|---|
+| Haiku | nobody | $0.01 | The default. Good enough to watch, with some lines that read oddly. |
+| Haiku | Haiku | $0.02 | Catches slips and a term translated two ways. Tends to miss what it misunderstood the first time. |
+| Haiku | Sonnet | $0.11 | The recommended step up: the stronger reader also catches misread idioms. |
+| Sonnet | nobody | $0.27 | Better phrasing on every line, not only the corrected ones. |
+| Sonnet | Sonnet | $0.37 | The same, made consistent across the whole film. |
+| Sonnet | Haiku | $0.28 | Not recommended. A reader corrects what it can tell is wrong, and a weaker one can "correct" lines the stronger translator got right. |
+
+Measured once, on the 1,878-line film: Haiku translating plus Sonnet reading came to $0.26 in
+all. Sonnet translating that film is estimated at $0.66, and translation estimates have run low
+so far.
+
+The review screen marks the recommended reader for each file and warns about a weaker one.
 
 ## What the UI does
 
