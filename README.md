@@ -7,7 +7,8 @@ Local web UI plus a command line.
 ![Three episodes are queued and translated; one is opened while its lines fill in](docs/translate.gif)
 
 *The pictures on this page are from demo mode: no API calls, and quicker than a real run. The
-Finnish in them was prepared for the demo file; it is not output from a live translation.*
+Finnish in them, the proofreading slips and corrections included, was written for the demo; it
+is not output from a live translation. The shows and movies are invented.*
 
 ## Status
 
@@ -98,6 +99,8 @@ a file's review screen sends the whole translation, original beside it, in one r
 back only the lines that should change: an idiom translated word for word, a wrong inflection, a
 term that changed half way through.
 
+![The Proofread tab: six corrected lines, each with its earlier wording struck through beneath](docs/proofread.png)
+
 - You choose which model reads, and see the estimate before it starts. Reading costs less than
   translating with the same model, because nearly all of it is input. A stronger reader still
   costs more than a cheap translator: in the one live run, Sonnet reading the 1,878-line film
@@ -127,6 +130,8 @@ all. Sonnet translating that film is estimated at $0.66, and translation estimat
 so far.
 
 The review screen marks the recommended reader for each file and warns about a weaker one.
+
+<img src="docs/proofread-menu.png" width="440" alt="The Proofread menu: three models with an estimate each, the next one up from the translator marked as recommended">
 
 ## What the UI does
 
@@ -207,6 +212,8 @@ field for the right one. To add the webhook by hand instead, **Automation** has 
 Once Sonarr or Radarr is connected, **Library** lists their shows and movies. Unfold a show to
 see each episode: it has subtitles in your language, it was translated by Subtle, it is missing
 them, or there is nothing to translate from.
+
+![The Library page: one show unfolded, its episodes marked as having subtitles, translated by Subtle, missing, or with nothing to translate from](docs/library.png)
 
 - **Add missing to the queue** puts those episodes or movies in the queue with an estimate
   each. Nothing is spent until you press Translate there. Each translation is saved beside its
