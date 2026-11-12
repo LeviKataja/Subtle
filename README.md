@@ -20,7 +20,7 @@ Finnish; everything else has only met the built-in fake model. What has and has 
 | Proofreading | Covered by the tests. One live run: Sonnet 5.5 reading the 1,878-line translation changed 44 lines for about 21 cents. Whether those were the right 44 has not been judged yet. |
 | Repair | Covered by the tests. Not looked at in the live runs. |
 | Subtitles inside video files | Tried with real ffmpeg on MKV and MP4 files. Picture-based tracks only with stand-in data. |
-| Sonarr, Radarr, Bazarr | Written against their source and tested against stand-ins. Not tried with real instances. |
+| Sonarr, Radarr, Bazarr, the Library page | Written against their source and tested against stand-ins. Not tried with real instances. |
 | Dockerfile | Never built. |
 
 Start with one file and a low spending cap, and read the result before trusting it with a library.
@@ -139,6 +139,8 @@ The review screen marks the recommended reader for each file and warns about a w
 - Lines that fail a check are flagged. **Fix flagged lines** re-sends only those: untranslated
   ones are redone, lines too long for their time on screen are shortened.
 - `↻` on any line translates it again, optionally with an instruction ("more casual").
+- **Library** lists the shows and movies Sonarr and Radarr know, with what each video has by
+  way of subtitles (see Automation).
 - Glossary for names and terms. Only entries that occur in a request are sent with it.
 - Tone, sound-description stripping, lyric handling and a free-text note for the translator.
 
@@ -157,7 +159,8 @@ subtle/
   qa.py         local quality flags
   wrap.py       line breaking
   media.py      subtitles for a video: sidecar file, or a track pulled out with ffmpeg
-  arr.py        Sonarr/Radarr API (connect, add the webhook) and webhook bodies, path mapping, Bazarr API
+  arr.py        Sonarr/Radarr API (connect, add the webhook, list the library), path mapping, Bazarr API
+  library.py    what each video has, and the record of the subtitle files Subtle wrote
   providers.py  Claude (and the offline mock used by tests and --mock)
   cache.py      sqlite cache of finished chunks
   server.py     local web server (standard library only)
@@ -199,7 +202,29 @@ If Sonarr or Radarr cannot reach the address Subtle worked out for itself, the s
 field for the right one. To add the webhook by hand instead, **Automation** has the two URLs
 (each carries a secret): Settings → Connect → Webhook in each app, import and upgrade triggers on.
 
-For each import that is reported:
+### The Library page
+
+Once Sonarr or Radarr is connected, **Library** lists their shows and movies. Unfold a show to
+see each episode: it has subtitles in your language, it was translated by Subtle, it is missing
+them, or there is nothing to translate from.
+
+- **Add missing to the queue** puts those episodes or movies in the queue with an estimate
+  each. Nothing is spent until you press Translate there. Each translation is saved beside its
+  video.
+- **New episodes** on a show turns on automatic translation for that show. There is one switch
+  for every show and one for new movies. All of them start off.
+- What a video has is read from its folder every time, so the page stays right when files are
+  added, replaced or removed outside Subtle. The one thing Subtle keeps is a record of the
+  subtitle files it wrote (model, cost, date), which is how it tells its own work from real
+  subtitles. A file that something else has since replaced no longer counts as Subtle's.
+- The languages listed inside a video come from Sonarr's and Radarr's own scan, which cannot
+  tell text subtitles from picture ones. An episode shown as missing can still turn out to have
+  nothing usable; adding it to the queue says so.
+
+### What happens to an import
+
+Connecting does not translate anything by itself. An import is only acted on if its show is
+switched on in the Library (or every show is, or new movies are). Then:
 
 1. Skip it if subtitles in the target language already exist, as a file or as a track.
 2. If Bazarr is connected, ask it to search first. If it finds subtitles, nothing is translated.

@@ -251,6 +251,7 @@ class Automation(unittest.TestCase):
         cls.mgr.bazarr_poll, cls.mgr.bazarr_sync_wait = 0.01, 0.05
         cls.mgr.set_config({"target": "fi", "path_maps": [["/tv", str(cls.lib / "tv")], ["/movies", str(cls.lib / "movies")]],
                             "bazarr_url": cls.bz_url, "bazarr_key": "bz-key", "auto_daily_budget": 5})
+        cls.mgr.set_auto({"all": True, "movies": True})  # these tests are about what happens once it is on
         Handler.open_host, Handler.password = False, ""
         cls.httpd, cls.base = start(Handler)
         cls.secret = cls.mgr.cfg["webhook_secret"]
@@ -412,6 +413,9 @@ class FakeArr(BaseHTTPRequestHandler):
     items: list = []
     hooks: list = []
     calls: list = []
+    listing: list = []  # full series or movie records, for the library; `items` is paths only
+    episodes: list = []
+    files: list = []
 
     def log_message(self, *args):
         pass
@@ -448,7 +452,11 @@ class FakeArr(BaseHTTPRequestHandler):
         if path in ("/api/v3/series", "/api/v3/movie"):
             if path.endswith("series") != (cls.app == "Sonarr"):
                 return self._reply(404)
-            return self._reply(200, [{"id": i, "path": p} for i, p in enumerate(cls.items, 1)])
+            return self._reply(200, cls.listing or [{"id": i, "path": p} for i, p in enumerate(cls.items, 1)])
+        if path in ("/api/v3/episode", "/api/v3/episodefile") and cls.app == "Sonarr":
+            series = int(parse_qs(urlparse(self.path).query).get("seriesId", ["0"])[0])
+            rows = cls.episodes if path.endswith("episode") else cls.files
+            return self._reply(200, [r for r in rows if r["seriesId"] == series])
         if path == "/api/v3/notification/schema":
             flags = {"onGrab": True, "onDownload": True, "onUpgrade": True, "onRename": True, "onHealthIssue": False,
                      "includeHealthWarnings": False, "supportsOnGrab": True, "supportsOnDownload": True}
@@ -613,6 +621,196 @@ class Setup(unittest.TestCase):
             body = json.loads(r.read())
         self.assertEqual((FakeSonarr.hooks, body["note"], body["state"]["arr"]["sonarr"]),
                          ([], "", {"url": "", "key_set": False}))
+
+
+class LibrarySonarr(FakeArr):
+    app, hooks, calls = "Sonarr", [], []
+
+
+class LibraryRadarr(FakeArr):
+    app, hooks, calls = "Radarr", [], []
+
+
+class Library(unittest.TestCase):
+    """The Library page's data and the per-show rule, against a stand-in Sonarr and Radarr.
+
+    The shapes served here follow SeriesResource, EpisodeResource, EpisodeFileResource and
+    MovieResource in the apps' source. A real Sonarr or Radarr has not been tried.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from subtle.server import Handler, Manager
+
+        os.environ["SUBTLE_HOME"] = tempfile.mkdtemp(prefix="subtle-library-")
+        cls.fake = FakeFfmpeg()
+        cls.saved = (media.tools, media.run)
+        media.tools, media.run = cls.fake.tools, cls.fake.run
+
+        class Own(Handler):
+            pass
+
+        cls.lib = Path(tempfile.mkdtemp(prefix="subtle-library-files-"))
+        cls.mgr = Own.mgr = Manager(mock=True)
+        cls.mgr._provider, cls.mgr._provider_for = MockProvider(), (True, "none", None)
+        Own.open_host, Own.password = False, ""
+        cls.httpd, cls.base = start(Own)
+        cls.sonarr_httpd, sonarr = start(LibrarySonarr)
+        cls.radarr_httpd, radarr = start(LibraryRadarr)
+        cls.mgr.set_config({"target": "fi", "save_next_to_source": False,
+                            "path_maps": [["/tv", str(cls.lib / "tv")], ["/movies", str(cls.lib / "movies")]]})
+        cls.mgr.cfg.update(sonarr_url=sonarr, sonarr_key=FakeArr.KEY, radarr_url=radarr, radarr_key=FakeArr.KEY)
+        cls.secret = cls.mgr.cfg["webhook_secret"]
+
+        season = "tv/Show/Season 01"
+        inside = {1: "", 2: "eng", 3: "eng/fin", 4: "spa", 5: "", 6: "eng"}
+        for n in (1, 2, 3, 4, 5):
+            cls.video(f"{season}/Show.S01E0{n}.mkv")
+        (cls.lib / season / "Show.S01E01.fi.srt").write_bytes(SAMPLE)  # real subtitles, not ours
+        (cls.lib / season / "Show.S01E05.en.srt").write_bytes(SAMPLE)  # something to translate from
+        LibrarySonarr.listing = [
+            {"id": 7, "title": "Show", "year": 2021, "path": "/tv/Show", "statistics": {"episodeFileCount": 6}},
+            {"id": 8, "title": "A Show With Nothing Yet", "year": 2024, "path": "/tv/Nothing", "statistics": {"episodeFileCount": 0}},
+        ]
+        LibrarySonarr.episodes = [{"id": 70 + n, "seriesId": 7, "episodeFileId": 700 + n, "seasonNumber": 1,
+                                   "episodeNumber": n, "title": f"Part {n}", "hasFile": True} for n in inside]
+        LibrarySonarr.episodes.append({"id": 77, "seriesId": 7, "episodeFileId": 0, "seasonNumber": 1,
+                                       "episodeNumber": 7, "title": "Not out yet", "hasFile": False})
+        LibrarySonarr.files = [{"id": 700 + n, "seriesId": 7, "seasonNumber": 1,
+                                "relativePath": f"Season 01/Show.S01E0{n}.mkv", "path": f"/{season}/Show.S01E0{n}.mkv",
+                                "mediaInfo": {"subtitles": langs}} for n, langs in inside.items()]
+        cls.video("movies/Film (2020)/Film (2020).mkv")
+        cls.video("movies/Old (1950)/Old (1950).mkv")
+        (cls.lib / "movies/Old (1950)/Old (1950).fi.srt").write_bytes(SAMPLE)
+        LibraryRadarr.listing = [
+            {"id": 3, "title": "Film", "year": 2020, "path": "/movies/Film (2020)", "hasFile": True,
+             "movieFile": {"relativePath": "Film (2020).mkv", "path": "/movies/Film (2020)/Film (2020).mkv",
+                           "mediaInfo": {"subtitles": "eng"}}},
+            {"id": 4, "title": "Old", "year": 1950, "path": "/movies/Old (1950)", "hasFile": True,
+             "movieFile": {"relativePath": "Old (1950).mkv", "mediaInfo": {"subtitles": ""}}},
+            {"id": 5, "title": "Wanted", "year": 2025, "path": "/movies/Wanted (2025)", "hasFile": False},
+        ]
+
+    @classmethod
+    def tearDownClass(cls):
+        for httpd in (cls.httpd, cls.sonarr_httpd, cls.radarr_httpd):
+            httpd.shutdown()
+        media.tools, media.run = cls.saved
+
+    @classmethod
+    def video(cls, rel):
+        path = cls.lib / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"not really a video")
+        return path
+
+    def call(self, path, body=None, headers=None):
+        req = urllib.request.Request(self.base + path, method="POST" if body is not None else "GET",
+                                     data=json.dumps(body).encode() if body is not None else None,
+                                     headers={"X-Subtle": "1", "Content-Type": "application/json", **(headers or {})})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"{}")
+
+    def outcome(self, file):
+        for _ in range(400):
+            entry = next((e for e in reversed(self.mgr.activity) if e["file"] == file), None)
+            if entry and entry["status"] in ("translated", "skipped", "error"):
+                return entry
+            time.sleep(0.02)
+        self.fail(f"no outcome for {file}: {self.mgr.activity[-3:]}")
+
+    def test_1_shows_and_movies_are_listed_with_what_each_video_has(self):
+        code, lib = self.call("/api/library")
+        self.assertEqual((code, lib["target"], lib["auto_all"], lib["auto_movies"]), (200, "Finnish", False, False))
+        self.assertEqual(lib["sonarr"]["items"], [{"id": 7, "title": "Show", "year": 2021, "files": 6, "auto": False}])
+        self.assertEqual([(m["title"], m["state"]) for m in lib["radarr"]["items"]], [("Film", "missing"), ("Old", "have")])
+
+        code, show = self.call("/api/library/show/7")
+        self.assertEqual([(e["number"], e["state"]) for e in show["episodes"]], [
+            (1, "have"),      # a Finnish subtitle file beside it
+            (2, "missing"),   # English inside, nothing Finnish
+            (3, "have"),      # a Finnish track inside
+            (4, "nosource"),  # only Spanish to go on
+            (5, "missing"),   # an English subtitle file beside it
+            (6, "gone"),      # Sonarr lists a file this machine cannot find
+        ])
+        self.assertEqual(show["episodes"][0]["note"], "Show.S01E01.fi.srt")
+        self.assertIn("inside: spa", show["episodes"][3]["note"])
+        self.assertNotIn("api", json.dumps(lib).lower().replace("/api/", ""))  # no keys in what the page gets
+
+    def test_2_missing_videos_are_queued_translated_and_then_known_as_ours(self):
+        events = self.mgr.subscribe()
+        code, body = self.call("/api/library/queue", {"kind": "sonarr", "series": 7, "ids": [71, 72, 73, 74, 75, 76]})
+        self.assertEqual((code, body), (200, {"asked": 6}))
+        done = None
+        for _ in range(2000):
+            event = events.get(timeout=10)
+            if event["type"] == "library":
+                done = event
+                break
+        self.mgr.unsubscribe(events)
+        self.assertEqual(done["added"], 2)
+        self.assertEqual({s["file"] for s in done["skipped"]}, {"S01E01", "S01E03", "S01E04", "S01E06"})
+        jobs = [j for j in self.mgr.jobs.values() if j.via.startswith("Library")]
+        self.assertEqual(sorted(j.via for j in jobs), ["Library · from Show.S01E05.en.srt",
+                                                        "Library · track inside Show.S01E02.mkv (eng SubRip)"])
+        self.assertTrue(all(j.status == "ready" and j.spent["cost"] == 0 for j in jobs))  # nothing spent by queueing
+
+        # asked for again while they wait: not added twice
+        events = self.mgr.subscribe()
+        self.call("/api/library/queue", {"kind": "sonarr", "series": 7, "ids": [72, 75]})
+        again = next(e for e in iter(lambda: events.get(timeout=10), None) if e["type"] == "library")
+        self.mgr.unsubscribe(events)
+        self.assertEqual((again["added"], {s["why"] for s in again["skipped"]}), (0, {"Already in the queue."}))
+
+        self.assertEqual(self.call("/api/start", {})[1], {"started": 2})
+        for _ in range(400):
+            if all(j.status == "done" for j in jobs):
+                break
+            time.sleep(0.02)
+        out = self.lib / "tv/Show/Season 01/Show.S01E02.fi.srt"
+        self.assertEqual(out.read_text("utf-8").count("-->"), 26)  # saved beside the video although that setting is off
+        states = {e["number"]: e for e in self.call("/api/library/show/7")[1]["episodes"]}
+        self.assertEqual((states[2]["state"], states[5]["state"], states[1]["state"]), ("ours", "ours", "have"))
+        self.assertEqual((states[2]["made"]["model"], states[2]["made"]["lines"]), ("claude-haiku-5-5", 26))
+        self.assertGreater(states[2]["made"]["cost"], 0)
+
+        out.write_bytes(SAMPLE)  # something else puts its own file there
+        states = {e["number"]: e["state"] for e in self.call("/api/library/show/7")[1]["episodes"]}
+        self.assertEqual(states[2], "have")
+
+    def test_3_only_what_was_chosen_is_translated_without_being_asked(self):
+        def imported(n, series):
+            self.video(f"tv/Show/Season 02/Show.S02E0{n}.mkv")
+            body = {"eventType": "Download", "series": {"id": series, "path": "/tv/Show"}, "episodes": [{"id": 200 + n}],
+                    "episodeFile": {"relativePath": f"Season 02/Show.S02E0{n}.mkv", "path": f"/tv/Show/Season 02/Show.S02E0{n}.mkv"}}
+            self.call(f"/webhook/sonarr?secret={self.secret}", body)
+            return self.outcome(f"Show.S02E0{n}.mkv")
+
+        entry = imported(1, 7)
+        self.assertEqual((entry["status"], entry["note"]),
+                         ("skipped", "Automatic translation is off for this show. Turn it on in the Library."))
+        self.assertEqual(self.call("/api/library/auto", {"series": 7, "on": True})[1]["auto_series"], [7])
+        self.assertTrue(self.call("/api/library")[1]["sonarr"]["items"][0]["auto"])
+        self.assertEqual(imported(2, 7)["status"], "translated")
+        self.assertEqual(imported(3, 9)["status"], "skipped")  # another show stays off
+        self.call("/api/library/auto", {"series": 7, "on": False})
+        self.assertEqual(imported(4, 7)["status"], "skipped")
+        self.call("/api/library/auto", {"all": True})
+        self.assertEqual(imported(5, 9)["status"], "translated")
+
+        movie = {"eventType": "Download", "movie": {"id": 3, "folderPath": "/movies/Film (2020)"},
+                 "movieFile": {"relativePath": "Film (2020).mkv"}}
+        self.call(f"/webhook/radarr?secret={self.secret}", movie)
+        self.assertIn("off for new movies", self.outcome("Film (2020).mkv")["note"])  # "every show" is not movies
+        self.call("/api/library/auto", {"movies": True})
+        self.mgr.activity.clear()
+        self.call(f"/webhook/radarr?secret={self.secret}", movie)
+        self.assertEqual(self.outcome("Film (2020).mkv")["status"], "translated")
+        self.call("/api/library/auto", {"all": False, "movies": False})
 
 
 if __name__ == "__main__":

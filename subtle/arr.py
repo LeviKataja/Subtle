@@ -1,7 +1,8 @@
-"""Sonarr and Radarr webhooks, and the Bazarr API.
+"""Sonarr and Radarr webhooks and library listings, and the Bazarr API.
 
-Sonarr/Radarr say "this file was just imported". Bazarr is asked first whether it can find
-real subtitles in the target language, and told to rescan once a translation is written.
+Sonarr/Radarr say "this file was just imported" and list what is in the library. Bazarr is
+asked first whether it can find real subtitles in the target language, and told to rescan
+once a translation is written.
 """
 from __future__ import annotations
 
@@ -136,6 +137,48 @@ class Arr:
         """The folder of every series or movie, as this app names them."""
         items = self._call("GET", "series" if self.kind == "sonarr" else "movie", timeout=90) or []
         return [str(i["path"]) for i in items if isinstance(i, dict) and i.get("path")]
+
+    @staticmethod
+    def _inside(file: dict | None) -> list[str] | None:
+        """Languages of the subtitle tracks inside a file, as the app's own scan lists them ("eng/fin").
+
+        None when the app has not scanned the file, which is not the same as finding no tracks.
+        """
+        info = (file or {}).get("mediaInfo")
+        if not isinstance(info, dict):
+            return None
+        return [code.strip().lower() for code in str(info.get("subtitles") or "").split("/") if code.strip()]
+
+    def titles(self) -> list[dict]:
+        """Every show (Sonarr) or movie (Radarr): id, title, year, and for a movie its file."""
+        out = []
+        for i in self._call("GET", "series" if self.kind == "sonarr" else "movie", timeout=90) or []:
+            if not isinstance(i, dict) or i.get("id") is None:
+                continue
+            item = {"id": int(i["id"]), "title": str(i.get("title") or ""), "year": i.get("year") or None}
+            if self.kind == "sonarr":
+                item["files"] = int((i.get("statistics") or {}).get("episodeFileCount") or 0)
+            else:
+                file = i.get("movieFile") if isinstance(i.get("movieFile"), dict) else None
+                item["path"] = str((file or {}).get("path") or _join(str(i.get("path") or ""),
+                                                                    str((file or {}).get("relativePath") or "")))
+                item["inside"] = self._inside(file)
+            out.append(item)
+        return sorted(out, key=lambda x: x["title"].lower())
+
+    def episodes(self, series: int) -> list[dict]:
+        """The episodes of one show that have a file: id, season, number, title, path, languages inside."""
+        files = {f["id"]: f for f in self._call("GET", f"episodefile?seriesId={int(series)}", timeout=90) or []
+                 if isinstance(f, dict) and f.get("id") is not None}
+        out = []
+        for e in self._call("GET", f"episode?seriesId={int(series)}", timeout=90) or []:
+            file = files.get(e.get("episodeFileId")) if isinstance(e, dict) else None
+            if not file or not file.get("path"):
+                continue
+            out.append({"id": int(e["id"]), "season": int(e.get("seasonNumber") or 0),
+                        "number": int(e.get("episodeNumber") or 0), "title": str(e.get("title") or ""),
+                        "path": str(file["path"]), "inside": self._inside(file)})
+        return sorted(out, key=lambda x: (x["season"], x["number"]))
 
     def _hook(self) -> dict | None:
         for n in self._call("GET", "notification") or []:

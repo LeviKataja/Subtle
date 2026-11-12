@@ -30,6 +30,7 @@ from .arr import Arr, ArrError, Bazarr, child_of, map_path, parse_webhook
 from .cache import Cache
 from .engine import BudgetExceeded, Options, Translator, estimate, estimate_proof, proofread, retranslate
 from .languages import LANGUAGES, resolve, variants
+from .library import Records, status as video_status
 from .model import Document
 from .prompt import clean_title
 from .providers import MODELS, Cancelled, ProviderError, build
@@ -61,6 +62,7 @@ class Job:
         self.proofed: dict = {}  # the latest proofreading pass: model, lines read, changed, dropped
         self.via = ""  # how the source was found, e.g. "Sonarr · track inside x.mkv (eng SubRip)"
         self.auto = False  # started by a webhook rather than a click
+        self.beside = False  # added from the Library: always saved next to its video
         self.ref: dict | None = None  # Sonarr/Radarr ids, for Bazarr
         self.entry: dict | None = None  # its line in the activity log
 
@@ -87,14 +89,14 @@ class Job:
 
     def to_json(self) -> dict:
         keep = ("id", "name", "src_path", "status", "error", "created", "est", "progress", "spent", "last",
-                "used", "saved_to", "via", "auto", "ref", "proofed")
+                "used", "saved_to", "via", "auto", "ref", "proofed", "beside")
         return {**{k: getattr(self, k) for k in keep}, "doc": self.doc.to_json()}
 
     @classmethod
     def from_json(cls, d: dict) -> "Job":
         job = cls(d["name"], Document.from_json(d["doc"]), d.get("src_path", ""))
         for k in ("id", "status", "error", "created", "est", "progress", "spent", "last", "used", "saved_to",
-                  "via", "auto", "ref", "proofed"):
+                  "via", "auto", "ref", "proofed", "beside"):
             if k in d:
                 setattr(job, k, d[k])
         if job.status in ("running", "queued"):  # the server was closed mid-run
@@ -107,6 +109,7 @@ class Manager:
         self.cfg = config.load()
         self.mock = mock or bool(os.environ.get("SUBTLE_MOCK"))
         self.cache = Cache(config.home() / "cache.db")
+        self.records = Records(config.home() / "records.db")
         self.jobs: dict[str, Job] = {}
         self.subs: set[queue.Queue] = set()
         self.lock = threading.RLock()
@@ -448,6 +451,126 @@ class Manager:
         midnight = time.mktime(time.localtime()[:3] + (0, 0, 0, 0, 0, -1))
         return sum(e.get("cost", 0.0) for e in self.activity if e["t"] >= midnight)
 
+    # --- the library ----------------------------------------------------------------
+
+    def arr(self, kind: str) -> Arr | None:
+        url, key = self.cfg.get(f"{kind}_url"), self.cfg.get(f"{kind}_key")
+        return Arr(kind, url, key) if url and key else None
+
+    def auto_wanted(self, origin: str, ref: dict | None) -> bool:
+        """Is this import one to translate without being asked? Only what was chosen in the Library is."""
+        if origin == "Radarr":
+            return bool(self.cfg.get("auto_movies"))
+        if self.cfg.get("auto_all"):
+            return True
+        return bool(ref) and ref.get("series") in (self.cfg.get("auto_series") or [])
+
+    def _state_of(self, path: str, inside) -> dict:
+        local = Path(map_path(path, self.cfg.get("path_maps")))
+        return video_status(local, self.cfg["target_code"], inside, self.records)
+
+    def library(self) -> dict:
+        """Shows and movies as Sonarr and Radarr list them. Movies come with their subtitle status."""
+        code = self.cfg["target_code"]
+        chosen = set(self.cfg.get("auto_series") or [])
+        out = {"target": self.cfg["target_name"], "auto_all": bool(self.cfg.get("auto_all")),
+               "auto_movies": bool(self.cfg.get("auto_movies"))}
+        for kind in ("sonarr", "radarr"):
+            arr = self.arr(kind)
+            part = out[kind] = {"connected": bool(arr), "error": "", "items": []}
+            if not arr:
+                continue
+            try:
+                items = arr.titles()
+            except ArrError as e:
+                part["error"] = str(e)
+                continue
+            if kind == "sonarr":
+                part["items"] = [{**i, "auto": i["id"] in chosen} for i in items if i["files"]]
+            else:
+                part["items"] = [{"id": i["id"], "title": i["title"], "year": i["year"],
+                                  **(self._state_of(i["path"], i["inside"]) if code else {"state": "", "note": ""})}
+                                 for i in items if i["path"]]
+        return out
+
+    def show(self, series: int) -> dict:
+        """The episodes of one show that have a file, each with its subtitle status."""
+        arr = self.arr("sonarr")
+        if not arr:
+            raise ValueError("Sonarr is not connected.")
+        if not self.cfg["target_code"]:
+            raise ValueError("Choose a language to translate into first.")
+        episodes = [{"id": e["id"], "season": e["season"], "number": e["number"], "title": e["title"],
+                     **self._state_of(e["path"], e["inside"])} for e in arr.episodes(series)]
+        return {"id": series, "episodes": episodes}
+
+    def set_auto(self, data: dict) -> dict:
+        if "all" in data:
+            self.cfg["auto_all"] = bool(data["all"])
+        if "movies" in data:
+            self.cfg["auto_movies"] = bool(data["movies"])
+        if "series" in data:
+            chosen = {int(i) for i in self.cfg.get("auto_series") or []}
+            (chosen.add if data.get("on") else chosen.discard)(int(data["series"]))
+            self.cfg["auto_series"] = sorted(chosen)[:5000]
+        config.save(self.cfg)
+        return {k: self.cfg[k] for k in ("auto_all", "auto_movies", "auto_series")}
+
+    def queue_library(self, kind: str, ids: list[int], series: int | None = None) -> int:
+        """Put videos from the library into the queue, ready to translate. Nothing is spent yet.
+
+        Finding the subtitles can mean pulling a track out of each video, so it runs in the
+        background; the jobs appear in the queue as they are ready and a final event says how it went.
+        """
+        arr = self.arr(kind)
+        if not arr:
+            raise ValueError("That app is not connected.")
+        if not self.cfg["target_code"]:
+            raise ValueError("Choose a language to translate into first.")
+        wanted = {int(i) for i in ids[:500]}
+        if not wanted:
+            raise ValueError("Nothing was chosen.")
+
+        def work() -> None:
+            added, skipped = 0, []
+            try:
+                if kind == "sonarr":
+                    videos = [(e, f"S{e['season']:02d}E{e['number']:02d}") for e in arr.episodes(int(series or 0))]
+                else:
+                    videos = [(m, m["title"]) for m in arr.titles() if m.get("path")]
+                queued = {j.src_path for j in self.jobs.values() if j.status != "done"}
+                for item, label in videos:
+                    if item["id"] not in wanted:
+                        continue
+                    local = Path(map_path(item["path"], self.cfg.get("path_maps")))
+                    state = video_status(local, self.cfg["target_code"], item["inside"], self.records)
+                    if state["state"] != "missing":
+                        skipped.append({"file": label, "why": state["note"] or "It already has subtitles."})
+                        continue
+                    try:
+                        name, data, beside, how = media.source_for(local)
+                        if beside in queued:
+                            skipped.append({"file": label, "why": "Already in the queue."})
+                            continue
+                        job = self.add(name, data, beside, f"Library · {how}")
+                    except (media.MediaError, ValueError, OSError) as e:
+                        skipped.append({"file": label, "why": str(e)})
+                        continue
+                    job.beside = True
+                    job.ref = ({"kind": "episode", "series": int(series or 0), "id": item["id"]} if kind == "sonarr"
+                               else {"kind": "movie", "id": item["id"]})
+                    self._save(job)
+                    queued.add(beside)
+                    added += 1
+            except ArrError as e:
+                skipped.append({"file": "", "why": str(e)})
+            except Exception as e:  # never leave the page waiting for an event that will not come
+                skipped.append({"file": "", "why": f"{type(e).__name__}: {e}"})
+            self.publish({"type": "library", "added": added, "skipped": skipped[:50]})
+
+        threading.Thread(target=work, daemon=True).start()
+        return len(wanted)
+
     def webhook(self, kind: str, payload: dict) -> dict:
         origin = "Sonarr" if kind == "sonarr" else "Radarr"
         info = parse_webhook(kind, payload)
@@ -467,6 +590,10 @@ class Manager:
             code, lang = self.cfg["target_code"], self.cfg["target_name"]
             if not code:
                 return self._touch(entry, status="skipped", note="No language to translate into has been chosen.")
+            if not self.auto_wanted(origin, info.get("ref")):
+                what = "new movies" if origin == "Radarr" else "this show"
+                return self._touch(entry, status="skipped",
+                                   note=f"Automatic translation is off for {what}. Turn it on in the Library.")
             if local.suffix.lower() not in media.VIDEO_EXT:
                 return self._touch(entry, status="skipped", note="Not a video file.")
             if not local.is_file():
@@ -607,6 +734,11 @@ class Manager:
             self._announce(job)
             if job.auto:
                 self._after_auto(job)
+            elif job.beside and job.ref and job.saved_to and self.bazarr():
+                try:
+                    self.bazarr().rescan(job.ref)  # so Bazarr notices the new file beside the video
+                except ArrError:
+                    pass
 
     def _proof(self, job: Job, opts: Options, model: str = "") -> str:
         """One proofreading pass over a finished job. Returns "" or what went wrong.
@@ -632,7 +764,7 @@ class Manager:
 
     def _autosave(self, job: Job) -> None:
         """Write name.<lang>.srt beside the source, for files that were added from disk."""
-        wanted = self.cfg.get("save_next_to_source") or job.auto
+        wanted = self.cfg.get("save_next_to_source") or job.auto or job.beside
         if not (job.src_path and wanted and job.used.get("target_code")):
             return
         try:
@@ -640,6 +772,11 @@ class Manager:
             if out != Path(job.src_path):
                 out.write_text(formats.render(job.doc, bool(self.cfg.get("bilingual"))), "utf-8")
                 job.saved_to = str(out)
+                cues = job.doc.cues
+                self.records.put(out, model=job.used.get("model", ""), reader=job.proofed.get("model", ""),
+                                 cost=job.spent["cost"], lines=sum(1 for c in cues if c.text.strip()),
+                                 flagged=sum(1 for c in cues if c.flags),
+                                 changed=sum(1 for c in cues if c.prev is not None))
         except OSError as e:
             job.error = f"Translated, but could not save next to the source: {e}"
 
@@ -929,6 +1066,11 @@ class Handler(BaseHTTPRequestHandler):
         if method == "GET":
             if path == "/api/state":
                 return mgr.state()
+            if path == "/api/library":
+                return mgr.library()
+            m = re.fullmatch(r"/api/library/show/(\d+)", path)
+            if m:
+                return mgr.show(int(m.group(1)))
             if path == "/api/download.zip":
                 buf = io.BytesIO()
                 with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
@@ -978,6 +1120,13 @@ class Handler(BaseHTTPRequestHandler):
                                    given, reach)
         if path == "/api/arr/disconnect":
             return mgr.disconnect_arr(str(data.get("kind", "")))
+        if path == "/api/library/auto":
+            return mgr.set_auto(data)
+        if path == "/api/library/queue":
+            kind = str(data.get("kind", ""))
+            if kind not in ("sonarr", "radarr"):
+                raise KeyError("Not found.")
+            return {"asked": mgr.queue_library(kind, [int(i) for i in data.get("ids", [])], data.get("series"))}
         if path == "/api/start":
             return {"started": mgr.start(data.get("ids"))}
         if path == "/api/clear":

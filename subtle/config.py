@@ -40,6 +40,10 @@ DEFAULTS = {
     "bazarr_key": "",
     "bazarr_wait": 0,  # minutes Bazarr gets to find real subtitles before a file is translated
     "auto_daily_budget": 1.0,  # USD per day for translations nobody clicked; 0 = no limit
+    # Which imports are translated without being asked. Nothing is, until something is chosen.
+    "auto_all": False,  # new episodes of every show
+    "auto_series": [],  # ...or only of these shows (Sonarr series ids)
+    "auto_movies": False,  # new movies
 }
 
 

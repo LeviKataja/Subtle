@@ -25,6 +25,7 @@
   <div class="grow"></div>
   <div class="spend" id="spend" title="Spent on the files currently in the queue"></div>
   <button class="btn ghost icon" id="themeBtn" aria-label="Switch between light and dark" title="Light / dark"></button>
+  <button class="btn ghost" id="libBtn">Library</button>
   <button class="btn ghost" id="autoBtn">Automation</button>
   <button class="btn ghost" id="settingsBtn">Settings</button>
 </header>
@@ -120,6 +121,25 @@
   <div class="grid-head"><div>#</div><div>Time</div><div>Original</div><div>Translation</div><div></div></div>
   <div class="rows" id="rows"></div>
   <div class="empty" id="rowsEmpty" hidden>Nothing matches.</div>
+</main>
+
+<!-- ───────────── Library ───────────── -->
+<main id="library" class="page" hidden>
+  <div class="rv-head">
+    <a class="back" href="#/">← Queue</a>
+    <h1>Library</h1>
+    <span class="muted" id="libSummary"></span>
+    <div class="grow"></div>
+    <input id="libSearch" type="search" placeholder="Find a show or movie…" aria-label="Find a show or movie">
+    <button class="btn" id="libRefresh" title="Ask Sonarr and Radarr again and look at the folders again">Refresh</button>
+  </div>
+  <div class="rv-note" id="libNote" hidden></div>
+  <div class="rv-bar">
+    <div class="tabs" id="libTabs" role="tablist"></div>
+    <div class="grow"></div>
+    <div id="libTools" class="inline"></div>
+  </div>
+  <div class="lib" id="libBody"></div>
 </main>
 
 <!-- ───────────── Dialogs ───────────── -->

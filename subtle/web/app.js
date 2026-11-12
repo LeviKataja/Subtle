@@ -466,9 +466,162 @@ function toggleRedo(r) {
   input.focus();
 }
 
+// ── library ────────────────────────────────────────────────────────────────
+// What Sonarr and Radarr have, and what each video has by way of subtitles. `open` holds the
+// episodes of the shows that are unfolded (null while they load).
+const L = { data: null, tab: 'shows', query: '', open: new Map(), loading: false };
+const VIDEO_STATE = {
+  have: ['', 'plain'], ours: ['translated by Subtle', 'green'], missing: ['missing', ''],
+  nosource: ['nothing to translate from', 'plain'], gone: ['file not found', 'red'],
+};
+
+function stateBadge(v) {
+  const [label, cls] = VIDEO_STATE[v.state] || [v.state, 'plain'];
+  let title = v.note || '';
+  if (v.made) {
+    const m = v.made;
+    title = modelLabel(m.model) + (m.reader ? `, proofread by ${modelLabel(m.reader)}` : '') +
+      ` · ${money(m.cost)} · ${plural(m.lines, 'line')}` + (m.flagged ? `, ${m.flagged} to check` : '');
+  }
+  return el('span', { class: 'badge ' + cls, text: v.state === 'have' ? `${L.data.target} subtitles` : label, title });
+}
+
+const loadShow = guard(async id => {
+  if (!L.open.has(id)) L.open.set(id, null);
+  renderLibrary();
+  try {
+    L.open.set(id, (await api('/api/library/show/' + id)).episodes);
+  } catch (e) { L.open.delete(id); throw e; } finally { renderLibrary(); }
+});
+
+const loadLibrary = guard(async () => {
+  L.loading = true;
+  renderLibrary();
+  try {
+    L.data = await api('/api/library');
+    for (const id of L.open.keys()) loadShow(id);  // what is unfolded may have changed too
+  } finally { L.loading = false; renderLibrary(); }
+});
+
+function openLibrary() {
+  S.open = S.detail = null;
+  $('#home').hidden = $('#review').hidden = true;
+  $('#library').hidden = false;
+  window.scrollTo(0, 0);
+  loadLibrary();
+}
+
+const setAuto = guard(async patch => {
+  const r = await api('/api/library/auto', patch);
+  Object.assign(S.cfg, r);
+  if (L.data) {
+    Object.assign(L.data, { auto_all: r.auto_all, auto_movies: r.auto_movies });
+    for (const s of L.data.sonarr.items) s.auto = r.auto_series.includes(s.id);
+  }
+  renderLibrary();
+});
+
+const queueMissing = guard(async (kind, ids, series) => {
+  await api('/api/library/queue', { kind, ids, series });
+  toast(`Looking for subtitles in ${plural(ids.length, 'video')}…`);
+});
+
+function autoSwitch(label, on, change, disabled, title) {
+  const box = el('input', { type: 'checkbox', checked: on, disabled, onchange: e => change(e.target.checked) });
+  return el('label', { class: 'check lib-auto', title, onclick: e => e.stopPropagation() }, box, label);
+}
+
+function addButton(kind, missing, series) {
+  return el('button', {
+    class: 'btn small', text: `Add ${missing.length} missing to the queue`,
+    title: 'Puts them in the queue with a cost estimate each. Nothing is spent until you press Translate there.',
+    onclick: e => { e.stopPropagation(); queueMissing(kind, missing.map(v => v.id), series); },
+  });
+}
+
+function showRows(show) {
+  const unfolded = L.open.has(show.id), eps = L.open.get(show.id);
+  const head = el('div', {
+    class: 'lib-row show', tabIndex: 0, role: 'button', 'aria-expanded': String(unfolded),
+    onclick: () => { unfolded ? L.open.delete(show.id) : loadShow(show.id); if (unfolded) renderLibrary(); },
+    onkeydown: e => { if (e.key === 'Enter' && e.target === e.currentTarget) e.currentTarget.click(); },
+  }, el('span', { class: 'chev', text: '›' }),
+    el('div', { class: 'lib-title' }, show.title, show.year && el('small', { text: show.year })),
+    el('span', { class: 'lib-count', text: plural(show.files, 'episode') }),
+    autoSwitch('New episodes', show.auto || L.data.auto_all, on => setAuto({ series: show.id, on }), L.data.auto_all,
+      L.data.auto_all ? 'On for every show (the switch above the list)' : 'Translate new episodes of this show as they arrive'));
+  if (!unfolded) return [head];
+  if (!eps) return [head, el('div', { class: 'lib-eps' }, el('div', { class: 'lib-sum', text: 'Looking at the files…' }))];
+  const done = eps.filter(e => e.state === 'have' || e.state === 'ours').length;
+  const missing = eps.filter(e => e.state === 'missing');
+  const box = el('div', { class: 'lib-eps' }, el('div', { class: 'lib-sum' },
+    `${done} of ${eps.length} have ${L.data.target} subtitles` + (missing.length ? ` · ${missing.length} missing` : ''),
+    missing.length > 0 && addButton('sonarr', missing, show.id)));
+  let season = null;
+  for (const e of eps) {
+    if (e.season !== season) {
+      season = e.season;
+      box.append(el('div', { class: 'lib-season', text: season ? `Season ${season}` : 'Specials' }));
+    }
+    box.append(el('div', { class: 'lib-ep' },
+      el('span', { class: 'num', text: 'E' + String(e.number).padStart(2, '0') }),
+      el('span', { class: 'what' }, e.title, ['nosource', 'gone'].includes(e.state) && el('span', { class: 'why', text: e.note })),
+      stateBadge(e)));
+  }
+  return [head, box];
+}
+
+function renderLibrary() {
+  const d = L.data, note = $('#libNote'), body = $('#libBody'), tools = $('#libTools');
+  $('#libSummary').textContent = L.loading ? 'Asking Sonarr and Radarr…' : '';
+  if (!d) {
+    note.hidden = true;
+    return [$('#libTabs'), tools, body].forEach(n => n.replaceChildren());
+  }
+  const shows = L.tab === 'shows', part = shows ? d.sonarr : d.radarr, app = shows ? 'Sonarr' : 'Radarr';
+  $('#libTabs').replaceChildren(...[['shows', 'Shows', d.sonarr], ['movies', 'Movies', d.radarr]].map(([key, label, p]) =>
+    el('button', { role: 'tab', 'aria-selected': String(L.tab === key), onclick: () => { L.tab = key; renderLibrary(); } },
+      label, el('span', { text: p.items.length }))));
+
+  const message = !d.target ? 'Choose a language to translate into on the main page first.'
+    : !part.connected ? `${app} is not connected, so there is nothing to list here.` : part.error;
+  note.hidden = !message;
+  note.className = 'rv-note' + (part.connected && part.error ? ' bad' : '');
+  note.replaceChildren(message || '', ' ', d.target && !part.connected
+    ? el('button', { class: 'btn small', text: `Connect ${app}…`, onclick: openSetup }) : '');
+
+  const items = part.items.filter(i => !L.query || i.title.toLowerCase().includes(L.query));
+  tools.replaceChildren();
+  if (part.connected && !part.error) {
+    const missing = shows ? [] : items.filter(m => m.state === 'missing');
+    if (missing.length) tools.append(addButton('radarr', missing));
+    tools.append(shows
+      ? autoSwitch('Translate new episodes of every show', d.auto_all, on => setAuto({ all: on }), false,
+          'Otherwise only the shows switched on below are translated as episodes arrive')
+      : autoSwitch('Translate new movies', d.auto_movies, on => setAuto({ movies: on }), false,
+          'Translate each movie as it arrives, unless it already has subtitles'));
+  }
+  const rows = shows ? items.flatMap(showRows) : items.map(m => el('div', { class: 'lib-row' },
+    el('span'), el('div', { class: 'lib-title' }, m.title, m.year && el('small', { text: m.year }),
+      ['nosource', 'gone'].includes(m.state) && el('span', { class: 'why', text: m.note })),
+    el('span'), m.state ? stateBadge(m) : el('span')));
+  if (!rows.length && part.connected && !part.error) {
+    rows.push(el('div', { class: 'lib-empty', text: L.query ? 'Nothing matches.' : `${app} lists nothing with a file yet.` }));
+  }
+  body.hidden = !rows.length;
+  body.replaceChildren(...rows);
+}
+
 // ── live events ────────────────────────────────────────────────────────────
 function onEvent(ev) {
   if (ev.type === 'job') return upsertJob(ev.job);
+  if (ev.type === 'library') {
+    toast(ev.added ? `${plural(ev.added, 'file')} added to the queue, ready to translate.` : 'Nothing was added to the queue.');
+    if (ev.skipped.length) {
+      toast(`Left out ${ev.skipped.length}: ` + ev.skipped.slice(0, 3).map(s => (s.file ? s.file + ': ' : '') + s.why).join(' · '), true);
+    }
+    return;
+  }
   if (ev.type === 'activity') {
     S.activity = ev.list;
     S.autoSpent = ev.spent;
@@ -783,6 +936,8 @@ function openSetup() {
 
 // ── wiring ─────────────────────────────────────────────────────────────────
 function route() {
+  if (location.hash.startsWith('#/library')) return openLibrary();
+  $('#library').hidden = true;
   const m = location.hash.match(/^#\/job\/([0-9a-f]+)/);
   if (m && S.jobs.has(m[1])) openJob(m[1]);
   else { if (m) history.replaceState(null, '', '#/'); closeJob(); }
@@ -804,6 +959,9 @@ function bind() {
   $('#notes').addEventListener('change', e => saveCfg({ notes: e.target.value }));
   $('#glossaryBtn').onclick = openGlossary;
   $('#settingsBtn').onclick = openSettings;
+  $('#libBtn').onclick = () => { location.hash = '#/library'; };
+  $('#libRefresh').onclick = loadLibrary;
+  $('#libSearch').addEventListener('input', e => { L.query = e.target.value.trim().toLowerCase(); renderLibrary(); });
   $('#keyBannerBtn').onclick = openSetup;
   $('#autoBtn').onclick = openAutomation;
   $('#suKeySave').onclick = guard(async () => {
