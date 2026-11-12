@@ -17,6 +17,13 @@ becomes
 2|no podemos quedarnos aquí.
 3|- ¿Por qué no?"""
 
+_PROOF_EXAMPLE = """Format example (English to Spanish):
+1|What a day. => Qué día.
+2|It's raining cats and dogs. => Están lloviendo gatos y perros.
+3|Let's go home. => Vamos a casa.
+becomes
+2|Está lloviendo a cántaros."""
+
 _REGISTER = {
     "informal": "- Characters address each other informally (familiar \"you\") unless a scene clearly calls for formality.",
     "formal": "- Characters address each other formally (polite \"you\") unless a scene is clearly intimate.",
@@ -80,6 +87,7 @@ def proof_prompt(target: str, source: str = "English", register: str = "auto",
         "",
         "Read the whole script first. Then reply with only the lines whose translation should change, "
         "as N|corrected translation, one per line and nothing else: no notes, no reasons, no code fences. "
+        "After the number comes the corrected translation alone: never repeat the original or the arrow. "
         "Leave out every line that is fine. If nothing needs changing, reply with the single word OK.",
         "",
         "Correct a line when:",
@@ -109,6 +117,7 @@ def proof_prompt(target: str, source: str = "English", register: str = "auto",
         parts += ["", f"Work: {title}"]
     if notes.strip():
         parts += ["", f"Notes from the user: {notes.strip()}"]
+    parts += ["", _PROOF_EXAMPLE]
     return "\n".join(parts)
 
 

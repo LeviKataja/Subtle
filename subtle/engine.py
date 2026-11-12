@@ -90,6 +90,17 @@ def estimate(doc: Document, opts: Options) -> dict:
             "inp": int(inp), "out": int(out), "cost": (inp * pin + out * pout) / 1e6}
 
 
+def _unecho(text: str, src: str) -> str:
+    """Drop a repeated "original => " from the front of a reply line.
+
+    The context lines in a request are written "original => translation", and a model now and
+    then answers in the same shape. Only cut when what precedes the arrow really is the original.
+    """
+    head, arrow, tail = text.partition("=>")
+    same = " ".join(head.split()).lower() == " ".join(src.split()).lower()
+    return tail.strip() if arrow and same else text
+
+
 def _windows(missing: list[int], n: int, radius: int = 1) -> list[list[int]]:
     """Missing line numbers -> merged [first, last] spans, each padded with a neighbour either side."""
     spans: list[list[int]] = []
@@ -227,7 +238,8 @@ class Translator:
         reply = self.provider.complete(model, self.system, user, on_text=feed, cancel=self.cancel)
         self._spend(reply, model)
         cut = reply.stop == "max_tokens"  # ran out of room: the last line is not to be trusted
-        got = {i: self._clean(us[i], text) for i, text in parse(reply.text, len(us), cut).items()}
+        got = {i: self._clean(us[i], _unecho(text, wire_text(us[i])))
+               for i, text in parse(reply.text, len(us), cut).items()}
         # A line that comes back as "." had its words folded into a neighbour. Counting it as
         # missing sends it through the same repair as a skipped line.
         return {i: t for i, t in got.items() if t and has_words(t)}, reply.stop == "refusal"
@@ -253,7 +265,7 @@ class Translator:
         return strip_dash(text).strip() if u.dash else text
 
     def _preview(self, u: Unit, text: str) -> None:
-        u.tgt = self._clean(u, text) or None
+        u.tgt = self._clean(u, _unecho(text, wire_text(u))) or None
         self._show(u.cue)
         self._progress()
 
@@ -393,9 +405,16 @@ def proofread(doc: Document, opts: Options, provider, model: str = "", emit=None
 
         by_cue: dict[int, list[tuple[Unit, str]]] = {}
         for j, text in parse(reply.text, len(us), reply.stop == "max_tokens").items():
-            u, text = us[j], tr._clean(us[j], text)
-            if text and text != u.tgt:
-                by_cue.setdefault(u.cue, []).append((u, text))
+            u = us[j]
+            # The request shows "original => translation", and a reply sometimes repeats that shape
+            # instead of giving the correction alone. Only what follows the arrow is the correction.
+            text = tr._clean(u, text.rsplit("=>", 1)[-1])
+            if not text or text == u.tgt:
+                continue
+            if len(u.src.split()) >= 4 and u.src.lower() in text.lower():
+                summary["dropped"] += 1  # the original pasted into the translation some other way
+                continue
+            by_cue.setdefault(u.cue, []).append((u, text))
         for ci, fixes in sorted(by_cue.items()):
             cue, plan = doc.cues[ci], tr.plans[ci]
             if cue.edited:

@@ -21,7 +21,7 @@ from subtle.chunker import make_chunks  # noqa: E402
 from subtle.engine import (BudgetExceeded, Options, Translator, estimate, estimate_proof, proofread,  # noqa: E402
                            retranslate, translate)
 from subtle.prep import prepare, wire_text  # noqa: E402
-from subtle.prompt import clean_title, glossary_hits, system_prompt, user_message  # noqa: E402
+from subtle.prompt import clean_title, glossary_hits, proof_prompt, system_prompt, user_message  # noqa: E402
 from subtle.providers import Cancelled, MockProvider, pseudo  # noqa: E402
 from subtle.wire import parse  # noqa: E402
 from subtle.wrap import wrap  # noqa: E402
@@ -225,6 +225,19 @@ class Engine(unittest.TestCase):
         cue.translation = "."  # the same thing arriving by a hand edit or an old file is flagged
         self.assertEqual(qa.check(cue, "fi"), ["empty"])
 
+    def test_a_translation_that_repeats_the_original_before_an_arrow_is_cleaned_up(self):
+        class Echo(MockProvider):
+            def complete(self, model, system, user, **kw):
+                reply = super().complete(model, system, user, **kw)
+                asked = dict(re.findall(r"(?m)^(\d+)\|(.*)$", user.rsplit("Translate:\n", 1)[-1]))
+                reply.text = "\n".join(f"{n}|{asked[n]} => {t}" for n, t in re.findall(r"(?m)^(\d+)\|(.*)$", reply.text))
+                return reply
+
+        doc, clean = self.doc(), self.doc()
+        translate(doc, Options(**FI), Echo())
+        translate(clean, Options(**FI), MockProvider())
+        self.assertEqual([c.translation for c in doc.cues], [c.translation for c in clean.cues])
+
     def test_a_refused_line_is_isolated_and_flagged(self):
         doc, p = self.doc(), MockProvider(refuse="every flare we own")
         stats = translate(doc, Options(**FI), p)
@@ -339,6 +352,23 @@ class Proofread(unittest.TestCase):
         self.assertEqual([c.translation for c in doc.cues], before)
         self.assertTrue(all(c.prev is None for c in doc.cues))
         self.assertIn("Käsin korjattu rivi.", p.requests[0])  # shown for context all the same
+
+    def test_a_correction_that_repeats_the_original_keeps_only_the_translation(self):
+        doc = self.translated()
+        units, plans = prepare(doc)
+        long_src = units[plans[20].units[0]].src
+        self.assertGreaterEqual(len(long_src.split()), 4)
+        before = doc.cues[20].translation
+        p = MockProvider(fixes={self.line(doc, 18): "How long overdue? => Paljonko myöhässä?",  # as a live run did
+                                self.line(doc, 3): "=> Vartijan loki, päivä 412",
+                                self.line(doc, 20): long_src + " Ammuimme kaikki valoraketit."})
+        stats, summary = proofread(doc, Options(**FI), p)
+        self.assertEqual(doc.cues[18].translation, "Paljonko myöhässä?")
+        self.assertEqual(qa.visible(doc.cues[3].translation), "Vartijan loki, päivä 412")
+        self.assertEqual((summary["changed"], summary["dropped"]), ([3, 18], 1))  # the pasted original is refused
+        self.assertEqual(doc.cues[20].translation, before)
+        self.assertTrue(all("=>" not in (c.translation or "") for c in doc.cues))
+        self.assertIn("never repeat the original", p.requests and proof_prompt("Finnish"))
 
     def test_a_second_pass_still_remembers_the_first_wording(self):
         doc = self.translated()
