@@ -213,6 +213,7 @@ const openJob = guard(async id => {
 });
 
 function closeJob() {
+  if (S.open) window.scrollTo(0, 0);  // the review may have been scrolled far down
   S.open = S.detail = null;
   $('#review').hidden = true;
   $('#home').hidden = false;

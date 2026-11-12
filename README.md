@@ -4,6 +4,11 @@ Translates subtitle files (`.srt`, `.vtt`, `.ass`/`.ssa`) and plain `.txt` with 
 to send as few tokens as it can: an estimated cent or so an episode on the default model.
 Local web UI plus a command line.
 
+![Three episodes are queued and translated; one is opened while its lines fill in](docs/translate.gif)
+
+*The pictures on this page are from demo mode: no API calls, and quicker than a real run. The
+Finnish in them was prepared for the demo file; it is not output from a live translation.*
+
 ## Status
 
 Early, and not yet run against the live Claude API. What has and has not been tried:
@@ -30,6 +35,8 @@ python -m subtle
 That opens the UI at http://localhost:8756. The first time, a setup screen asks for an
 Anthropic API key (or set `ANTHROPIC_API_KEY`) and a language, and offers to connect Sonarr
 and Radarr. After that: drop files, press **Translate**.
+
+<img src="docs/setup.png" width="520" alt="The setup screen: API key, language, and optional Sonarr and Radarr connections">
 
 To try the UI with fake translations and no key:
 
@@ -80,6 +87,8 @@ The UI shows the estimate before you start and the real token counts and cost as
 
 ## What the UI does
 
+![The queue: one file done, one being translated, one waiting, each with its cost](docs/queue.png)
+
 - Queue with a cost estimate per file, live progress and the line currently being translated.
 - **Add a folder** scans a path on disk and writes each translation beside its source.
 - Review screen: original and translation side by side, filling in as the model streams.
@@ -89,6 +98,8 @@ The UI shows the estimate before you start and the real token counts and cost as
 - `↻` on any line translates it again, optionally with an instruction ("more casual").
 - Glossary for names and terms. Only entries that occur in a request are sent with it.
 - Tone, sound-description stripping, lyric handling and a free-text note for the translator.
+
+![The review screen: original and translation side by side, one line flagged as too fast to read](docs/review.png)
 
 ## Layout
 
@@ -109,6 +120,7 @@ subtle/
   server.py     local web server (standard library only)
   web/          the UI (no build step)
 tests/          python -m unittest discover -s tests
+docs/           the pictures on this page
 ```
 
 Settings, cache and queue live in `~/.subtle` (override with `--data` or `SUBTLE_HOME`).
