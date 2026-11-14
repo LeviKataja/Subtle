@@ -3,6 +3,8 @@
 const S = {
   cfg: {}, models: [], labels: {}, errors: [], keySource: 'none', keyHint: '', mock: false, home: '', version: '',
   jobs: new Map(), ticker: {}, open: null, detail: null, rowEls: new Map(), filter: 'all', query: '',
+  sel: null, anchor: null,  // the line the preview shows; the line whose neighbours a filter lets through
+  preview: true, section: 'key',
   ffmpeg: false, listen: {}, activity: [], bazarrKeySet: false, localKeySet: false, autoSpent: 0,
   arr: {}, arrResult: {},  // Sonarr/Radarr: what is saved, and what the last Connect reported
 };
@@ -99,6 +101,12 @@ function renderControls(languages) {
   if (document.activeElement !== $('#notes')) $('#notes').value = S.cfg.notes || '';
   const n = (S.cfg.glossary || []).length;
   $('#glossaryBtn').textContent = n ? `Glossary · ${n}` : 'Glossary';
+  $('#setupSum').textContent = [
+    { informal: 'Informal tone', formal: 'Formal tone' }[S.cfg.register] || 'Tone matches the scene',
+    S.cfg.sdh === 'strip' ? 'sound descriptions removed' : 'sound descriptions translated',
+    S.cfg.lyrics === 'translate' ? 'song lyrics translated' : 'song lyrics left as they are',
+    n ? `glossary of ${plural(n, 'term')}` : 'glossary empty',
+  ].join(' · ');
 }
 
 // ── queue ──────────────────────────────────────────────────────────────────
@@ -132,6 +140,58 @@ function renderSummary() {
   $('#clearBtn').hidden = !done;
   const spent = jobs.reduce((a, j) => ({ cost: a.cost + j.spent.cost, tok: a.tok + j.spent.inp + j.spent.out }), { cost: 0, tok: 0 });
   $('#spend').replaceChildren(...(spent.tok ? ['Spent ', el('b', { text: money(spent.cost) }), ` · ${tokens(spent.tok)} tokens`] : []));
+  $('#navLive').hidden = !running;
+  renderTab();
+}
+
+// ── the browser tab ────────────────────────────────────────────────────────
+// A queue is left to run in a background tab, so the tab's title says how far along it is and,
+// until you look, that it has finished. RUN is every file that has been busy since the queue
+// was last idle.
+const RUN = new Set();
+let resting = '';  // what the title says once the queue has finished and nobody has looked yet
+
+function renderTab() {
+  const busy = [...S.jobs.values()].filter(active);
+  for (const j of busy) RUN.add(j.id);
+  const run = [...RUN].map(id => S.jobs.get(id)).filter(Boolean);
+  if (busy.length) {
+    let done = 0, total = 0;
+    for (const j of run) { done += active(j) ? j.progress[0] : j.progress[1]; total += j.progress[1]; }
+    const pct = total ? Math.min(99, Math.floor(100 * done / total)) : 0;
+    resting = '';
+    document.title = `${pct}% · ${run.length > 1 ? `${run.length - busy.length} of ${run.length} done · ` : ''}Subtle`;
+    return;
+  }
+  if (RUN.size) {
+    RUN.clear();
+    const ok = run.filter(j => j.status === 'done'), bad = run.length - ok.length;
+    const check = ok.reduce((n, j) => n + (j.flagged || 0), 0);
+    if (run.length && (document.hidden || !document.hasFocus())) {
+      resting = !ok.length ? 'Stopped' : check ? `Done · ${check} to check` : 'Done';
+      notify([ok.length && `${plural(ok.length, 'file')} translated.`, check && `${plural(check, 'line')} to check.`,
+        bad && `${plural(bad, 'file')} stopped before the end.`].filter(Boolean).join(' '));
+    }
+  }
+  document.title = resting ? `${resting} · Subtle` : 'Subtle';
+}
+
+// Notifications are a choice made per browser, so the choice is kept in the browser.
+const canNotify = () => 'Notification' in window && window.isSecureContext;
+function wantsNotify() {
+  try { return localStorage.getItem('subtle-notify') === '1'; } catch (e) { return false; }
+}
+function notify(body) {
+  if (!canNotify() || !wantsNotify() || Notification.permission !== 'granted') return;
+  try {
+    const note = new Notification('Subtle', { body, icon: '/favicon.svg', tag: 'subtle-queue' });
+    note.onclick = () => { window.focus(); note.close(); };
+  } catch (e) { /* some browsers only allow these from a service worker */ }
+}
+function notifyHint() {
+  return !canNotify() ? 'Browsers only allow notifications on a page opened as localhost or over HTTPS, and this one is neither.'
+    : Notification.permission === 'denied' ? 'Notifications are blocked for this page in the browser. Allow them there first.'
+    : 'Sent only while this tab is in the background. The choice is kept in this browser.';
 }
 
 function jobRow(j) {
@@ -220,6 +280,7 @@ const openJob = guard(async id => {
   S.jobs.set(id, S.detail);
   S.filter = 'all';
   S.query = $('#search').value = '';
+  S.sel = S.anchor = null;
   $('#home').hidden = true;
   $('#review').hidden = false;
   renderReview();
@@ -247,7 +308,9 @@ function renderReview() {
   renderReviewHead();
   S.rowEls = new Map();
   $('#rows').replaceChildren(...S.detail.rows.map(r => { const node = cueRow(r); S.rowEls.set(r.i, node); return node; }));
+  S.rowEls.get(S.sel)?.classList.add('sel');
   applyFilter();
+  renderPreview();
 }
 
 function renderReviewHead() {
@@ -301,7 +364,7 @@ function renderReviewHead() {
   if (d.proofed.model || d.changed) tabs.splice(2, 0, ['proofed', 'Proofread']);
   else if (S.filter === 'proofed') S.filter = 'all';
   $('#rvTabs').replaceChildren(...tabs.map(([key, label]) =>
-    el('button', { role: 'tab', 'aria-selected': String(S.filter === key), onclick: () => { S.filter = key; renderReviewHead(); applyFilter(); } },
+    el('button', { role: 'tab', 'aria-selected': String(S.filter === key), onclick: () => { S.filter = key; S.anchor = null; renderReviewHead(); applyFilter(); } },
       label, el('span', { text: count(key) }))));
 }
 
@@ -373,25 +436,113 @@ function matches(r, filter, query) {
   return r.src.toLowerCase().includes(query) || (r.tr || '').toLowerCase().includes(query);
 }
 
+// With a filter or a search on, the line you select brings the two before and after it along:
+// a subtitle rarely makes sense alone.
+const CONTEXT = 2;
+const narrowed = () => S.filter !== 'all' || !!S.query.trim();
+
 function applyFilter() {
-  const q = S.query.trim().toLowerCase();
+  const q = S.query.trim().toLowerCase(), rows = S.detail.rows;
+  const at = narrowed() && S.anchor != null ? rows.findIndex(r => r.i === S.anchor) : -1;
+  const anchored = at >= 0 && matches(rows[at], S.filter, q);
   let shown = 0;
-  for (const r of S.detail.rows) {
-    const ok = matches(r, S.filter, q);
-    S.rowEls.get(r.i).hidden = !ok;
+  rows.forEach((r, k) => {
+    const ok = matches(r, S.filter, q), near = anchored && !ok && Math.abs(k - at) <= CONTEXT;
+    const node = S.rowEls.get(r.i);
+    node.hidden = !ok && !near;
+    node.classList.toggle('ctx', near);
     shown += ok;
-  }
+  });
   $('#rowsEmpty').hidden = shown > 0;
   $('#rows').hidden = shown === 0;
 }
 
+// A press on a line focuses it before the click is over. What selecting does moves the list, so
+// it waits for the click; a line reached with the keyboard is selected at once.
+let pressing = false;
+
+function select(i) {
+  if (S.sel === i || !S.detail) return;
+  const row = S.rowEls.get(i), r = S.detail.rows.find(x => x.i === i);
+  if (!row || !r) return;
+  const top = row.getBoundingClientRect().top;
+  S.rowEls.get(S.sel)?.classList.remove('sel');
+  S.sel = i;
+  row.classList.add('sel');
+  if (narrowed() && S.anchor !== i && matches(r, S.filter, S.query.trim().toLowerCase())) {
+    S.anchor = i;
+    applyFilter();
+  }
+  renderPreview();
+  const moved = row.getBoundingClientRect().top - top;  // neighbours or the preview arrived above it
+  if (moved) window.scrollBy(0, moved);
+}
+
+// ── how a line is drawn ────────────────────────────────────────────────────
+// Formatting tags stay in the text, dimmed, and what sits between <i> and </i> is drawn in
+// italics. A pen remembers whether it is inside italics, so a line can be drawn in pieces.
+const TAGS = /(<[^>]+>|\{\\[^}]*\})/;
+function pen() {
+  let italic = false;
+  return text => text.split(TAGS).flatMap((part, k) => {
+    if (!part) return [];
+    if (k % 2 === 0) return [italic ? el('i', { text: part }) : part];
+    if (/^<i\b/i.test(part)) italic = true;
+    else if (/^<\/i>/i.test(part)) italic = false;
+    return [el('span', { class: 'tagx', text: part })];
+  });
+}
+
+// `runs` is a list of [text, changed] pieces from changes(); without it the text is drawn plain.
+function draw(node, text, runs, tag) {
+  const ink = pen();
+  node.replaceChildren(...(runs || [[text, false]]).flatMap(([part, changed]) => changed ? [el(tag, {}, ink(part))] : ink(part)));
+}
+
+// Which words a proofread changed: the old and the new wording as [text, changed] pieces, or
+// null when the two share so little that marking single words would only be noise.
+const PIECE = /<[^>]+>|\{\\[^}]*\}|\s+|[.,!?…:;]+|[^\s.,!?…:;<{]+|./g;
+function changes(before, after) {
+  const A = before.match(PIECE) || [], B = after.match(PIECE) || [];
+  const blank = t => /^\s+$/.test(t), word = t => /[\p{L}\p{N}]/u.test(t) && t[0] !== '<' && t[0] !== '{';
+  const solid = T => T.map((t, at) => [t, at]).filter(([t]) => !blank(t));
+  const sa = solid(A), sb = solid(B), n = sa.length, m = sb.length;
+  if (n * m > 250000) return null;
+  const run = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));  // longest shared run from here on
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) run[i][j] = sa[i][0] === sb[j][0] ? run[i + 1][j + 1] + 1 : Math.max(run[i + 1][j], run[i][j + 1]);
+  }
+  const keptA = new Set(), keptB = new Set();
+  for (let i = 0, j = 0; i < n && j < m;) {
+    if (sa[i][0] === sb[j][0]) { keptA.add(i); keptB.add(j); i++; j++; } else if (run[i + 1][j] >= run[i][j + 1]) i++; else j++;
+  }
+  const same = [...keptA].filter(i => word(sa[i][0])).length;
+  const most = Math.max(sa.filter(x => word(x[0])).length, sb.filter(x => word(x[0])).length);
+  if (!most || same / most < 0.4) return null;
+  const pieces = (T, s, kept) => {
+    const changed = T.map(() => false);
+    s.forEach(([, at], k) => { if (!kept.has(k)) changed[at] = true; });
+    T.forEach((t, i) => { if (blank(t) && !t.includes('\n') && changed[i - 1] && changed[i + 1]) changed[i] = true; });
+    const out = [];
+    T.forEach((t, i) => {
+      const last = out[out.length - 1];
+      if (last && last[1] === changed[i]) last[0] += t; else out.push([t, changed[i]]);
+    });
+    return out;
+  };
+  return { was: pieces(A, sa, keptA), now: pieces(B, sb, keptB) };
+}
+
 function cueRow(r) {
   const editable = !active(S.detail) && r.tr != null;
-  const cell = el('div', { class: 'tr', spellcheck: false, text: r.tr ?? '' });
+  const marks = r.pv != null && r.tr != null ? changes(r.pv, r.tr) : null;
+  const cell = el('div', { class: 'tr', spellcheck: false });
+  const paint = () => { cell.classList.remove('editing'); draw(cell, r.tr ?? '', marks && marks.now, 'mark'); };
+  paint();
   if (editable) {
     try { cell.contentEditable = 'plaintext-only'; } catch (e) { cell.contentEditable = 'true'; }
     cell.addEventListener('keydown', e => {
-      if (e.key === 'Escape') { cell.textContent = r.tr ?? ''; cell.blur(); }
+      if (e.key === 'Escape') { paint(); cell.blur(); if (S.sel === r.i) renderPreview(); }
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         let next = cell.closest('.row').nextElementSibling;
@@ -399,16 +550,24 @@ function cueRow(r) {
         next ? $('.tr', next).focus() : cell.blur();
       }
     });
-    cell.addEventListener('blur', () => saveEdit(r, cell));
+    // While a line is being typed its change marks no longer describe it, and the preview follows the typing.
+    cell.addEventListener('input', () => {
+      cell.classList.add('editing');
+      if (S.sel === r.i) renderPreview(cell.innerText.replace(/\n+$/, ''));
+    });
+    cell.addEventListener('blur', () => saveEdit(r, cell, paint));
   }
   const meta = el('div', { class: 'meta' });
   fillMeta(meta, r);
   const dur = r.s != null ? `${clock(r.s, true)} → ${clock(r.e, true)}  (${((r.e - r.s) / 1000).toFixed(1)} s)` : '';
-  const row = el('div', { class: rowClass(r), 'data-i': r.i },
-    el('div', { class: 'n', text: r.i + 1 }), el('div', { class: 't', text: clock(r.s), title: dur }),
-    el('div', { class: 'src', text: r.src }), cell, meta,
-    r.pv != null && el('div', { class: 'was', text: r.pv, title: 'The wording before proofreading' }));
-  return row;
+  const src = el('div', { class: 'src' });
+  draw(src, r.src);
+  const was = r.pv != null && el('div', { class: 'was' + (marks ? '' : ' whole'), title: 'The wording before proofreading' });
+  if (was) draw(was, r.pv, marks && marks.was, 'del');
+  return el('div', {
+    class: rowClass(r), 'data-i': r.i,
+    onclick: () => select(r.i), onfocusin: () => { if (!pressing) select(r.i); },
+  }, el('div', { class: 'n', text: r.i + 1 }), el('div', { class: 't', text: clock(r.s), title: dur }), src, cell, meta, was);
 }
 
 function rowClass(r) {
@@ -418,7 +577,10 @@ function rowClass(r) {
 
 function fillMeta(meta, r) {
   const kids = [];
-  if (r.cps != null) kids.push(el('span', { class: 'cps' + (r.flags.includes('fast') ? ' over' : ''), text: `${Math.round(r.cps)} cps`, title: 'Characters per second' }));
+  if (r.cps != null) {
+    const fast = r.flags.includes('fast'), near = r.cps >= (S.cfg.max_cps || 21) * 0.85;
+    kids.push(el('span', { class: 'cps' + (fast ? ' over' : near ? '' : ' quiet'), text: `${Math.round(r.cps)} cps`, title: 'Characters per second' }));
+  }
   if (r.ed) kids.push(el('span', { class: 'badge plain', text: 'edited' }));
   if (r.pv != null) {
     kids.push(el('span', { class: 'badge plain', text: 'proofread' }));
@@ -441,19 +603,88 @@ function updateRow(r) {
   const fresh = cueRow(r);
   const old = S.rowEls.get(r.i);
   fresh.hidden = old.hidden;  // a line you just fixed stays put until the filter is applied again
+  for (const mark of ['ctx', 'sel']) fresh.classList.toggle(mark, old.classList.contains(mark));
   old.replaceWith(fresh);
   S.rowEls.set(r.i, fresh);
   renderReviewHead();
+  if (S.sel === r.i) renderPreview();
   return fresh;
 }
 
-const saveEdit = guard(async (r, cell) => {
+const saveEdit = guard(async (r, cell, paint) => {
   const text = cell.innerText.replace(/\n+$/, '');
-  if (text === (r.tr ?? '')) return;
+  if (text === (r.tr ?? '')) {
+    if (cell.classList.contains('editing')) paint();  // typed and put back: the marks apply again
+    return;
+  }
   try {
     updateRow(await api(`/api/jobs/${S.detail.id}/cue/${r.i}`, { text }));
-  } catch (e) { cell.textContent = r.tr ?? ''; throw e; }
+  } catch (e) { paint(); throw e; }
 });
+
+// ── the selected line as a viewer sees it ──────────────────────────────────
+// Tags are dropped, apart from the ones a player draws: italics, bold, underline and where on
+// the screen the line sits ({\an8} is top centre).
+function onScreen(text) {
+  const on = { i: false, b: false, u: false };
+  return text.split(TAGS).flatMap((part, k) => {
+    if (!part) return [];
+    if (k % 2) {
+      const m = /^<(\/?)([ibu])\b/i.exec(part);
+      if (m) on[m[2].toLowerCase()] = !m[1];
+      return [];
+    }
+    let node = document.createTextNode(part);
+    for (const t of 'ibu') if (on[t]) node = el(t, {}, node);
+    return [node];
+  });
+}
+
+// `typed` is what is in the cell right now, while the line is being edited.
+function renderPreview(typed) {
+  const box = $('#prev'), d = S.detail;
+  const r = d && d.rows.find(x => x.i === S.sel);
+  const text = r ? typed ?? r.tr : null;
+  const beside = matchMedia('(min-width: 1400px)').matches;  // room for it next to the list: it stays there
+  const on = S.preview && !!d && (beside || text != null);
+  box.hidden = !on;
+  $('#rvBody').classList.toggle('has-prev', on);
+  if (!on) return;
+  const screen = $('#prevScreen'), sub = $('#prevSub'), facts = $('#prevFacts');
+  const longest = S.cfg.max_chars || 42, limit = S.cfg.max_cps || 21;
+  screen.style.setProperty('--max-chars', longest);
+  if (text == null) {
+    screen.className = 'prev-screen';
+    sub.replaceChildren();
+    facts.replaceChildren(el('div', { class: 'prev-none', text: 'Select a line to see it the way a viewer does.' }));
+    return;
+  }
+  const place = +((/\\an([1-9])/.exec(text) || [])[1] || 2);  // numbered like a keypad: 2 is bottom centre
+  const side = place % 3 === 1 ? 'left' : place % 3 === 0 ? 'right' : '';
+  screen.className = ['prev-screen', place >= 7 ? 'top' : place >= 4 ? 'middle' : '', side].filter(Boolean).join(' ');
+  sub.style.textAlign = side || 'center';
+  sub.replaceChildren(...onScreen(text));
+
+  const seen = text.replace(new RegExp(TAGS.source, 'g'), '').trim();
+  const lines = seen.split('\n').map(l => l.trim().length);
+  // Each fact has a short wording too, which a phone shows instead.
+  const fact = (label, brief, value, over) => el('div', { class: 'prev-fact' },
+    el('span', {}, el('span', { class: 'long', text: label }), el('span', { class: 'brief', text: brief })),
+    el('b', { class: over ? 'over' : '', text: value }));
+  const out = [];
+  if (r.s != null && r.e > r.s && seen) {
+    const there = (r.e - r.s) / 1000, need = seen.split(/\s+/).join(' ').length / limit;
+    out.push(fact('On screen for', 'On screen', there.toFixed(1) + ' s'),
+      el('div', { class: 'prev-meter' + (need > there ? ' over' : ''), title: `At ${limit} characters per second` },
+        el('i', { style: `width:${Math.min(100, Math.round(100 * there / need))}%` })),
+      fact('Comfortable to read in', 'To read', need.toFixed(1) + ' s', need > there));
+  }
+  if (seen) {
+    out.push(fact(lines.length > 1 ? 'Line lengths' : 'Line length', 'Length', `${lines.join(lines.length > 2 ? ', ' : ' and ')} of ${longest}`,
+      lines.some(n => n > longest) || lines.length > 3));
+  }
+  facts.replaceChildren(...out);
+}
 
 function toggleRedo(r) {
   const row = S.rowEls.get(r.i), open = $('.redo-form', row);
@@ -799,7 +1030,7 @@ function onEvent(ev) {
     const r = S.detail.rows.find(x => x.i === ev.i), row = S.rowEls.get(ev.i);
     if (!r || !row) return;
     r.tr = ev.text;
-    $('.tr', row).textContent = ev.text;
+    draw($('.tr', row), ev.text);
     row.classList.remove('pending');
     row.classList.add('fresh');
     if ($('#follow').checked && !row.hidden) row.scrollIntoView({ block: 'center' });
@@ -830,8 +1061,18 @@ function connect() {
 }
 
 // ── dialogs ────────────────────────────────────────────────────────────────
-function openSettings() {
+// Settings shows one section at a time; the fields of the others stay in the page.
+function showSection(name) {
+  S.section = name;
+  for (const node of document.querySelectorAll('#settingsDlg [data-sec]')) {
+    if (node.tagName === 'BUTTON') node.setAttribute('aria-current', String(node.dataset.sec === name));
+    else node.hidden = node.dataset.sec !== name;
+  }
+}
+
+function openSettings(section) {
   const c = S.cfg;
+  showSection(section || S.section);
   $('#keyStatus').textContent = {
     env: 'Using the key in the ANTHROPIC_API_KEY environment variable.',
     saved: `A key is saved (${S.keyHint}).`, mock: 'Demo mode: no key is needed and nothing is sent anywhere.',
@@ -861,7 +1102,10 @@ function openSettings() {
     ? `${c.local_model} is offered next to Claude's models on the main page.`
     : 'Enter the address, look for models, and pick one.';
   $('#about').textContent = `Subtle ${S.version} · settings, cache and queue live in ${S.home}`;
-  $('#settingsDlg').showModal();
+  $('#notifyOn').disabled = !canNotify();
+  $('#notifyOn').checked = canNotify() && wantsNotify() && Notification.permission === 'granted';
+  $('#notifyStatus').textContent = notifyHint();
+  if (!$('#settingsDlg').open) $('#settingsDlg').showModal();
 }
 
 // Ask the server at the address in the Local model fields what it is and which models it has.
@@ -1119,7 +1363,10 @@ function openSetup() {
 
 // ── wiring ─────────────────────────────────────────────────────────────────
 function route() {
-  if (location.hash.startsWith('#/library')) return openLibrary();
+  const library = location.hash.startsWith('#/library');
+  $('#libBtn').setAttribute('aria-current', library ? 'page' : 'false');
+  $('#navQueue').setAttribute('aria-current', library ? 'false' : 'page');  // a file under review belongs to the queue
+  if (library) return openLibrary();
   $('#library').hidden = true;
   const m = location.hash.match(/^#\/job\/([0-9a-f]+)/);
   if (m && S.jobs.has(m[1])) openJob(m[1]);
@@ -1141,8 +1388,14 @@ function bind() {
   for (const id of ['register', 'sdh', 'lyrics']) $('#' + id).addEventListener('change', e => saveCfg({ [id]: e.target.value }));
   $('#notes').addEventListener('change', e => saveCfg({ notes: e.target.value }));
   $('#glossaryBtn').onclick = openGlossary;
-  $('#settingsBtn').onclick = openSettings;
-  $('#libBtn').onclick = () => { location.hash = '#/library'; };
+  $('#setupMoreBtn').onclick = e => {
+    const more = $('#setupMore');
+    more.hidden = !more.hidden;
+    e.currentTarget.textContent = more.hidden ? 'Change' : 'Done';
+    e.currentTarget.setAttribute('aria-expanded', String(!more.hidden));
+  };
+  $('#settingsBtn').onclick = () => openSettings();
+  for (const tab of document.querySelectorAll('#settingsDlg .set-side button')) tab.onclick = () => showSection(tab.dataset.sec);
   $('#libRefresh').onclick = loadLibrary;
   $('#libSearch').addEventListener('input', e => { L.query = e.target.value.trim().toLowerCase(); renderLibrary(); });
   $('#keyBannerBtn').onclick = openSetup;
@@ -1191,7 +1444,32 @@ function bind() {
   $('#goBtn').onclick = guard(() => api('/api/start', {}));
   $('#zipBtn').onclick = () => { location.href = '/api/download.zip'; };
   $('#clearBtn').onclick = guard(() => api('/api/clear', { which: 'done' }));
-  $('#search').addEventListener('input', e => { S.query = e.target.value; applyFilter(); });
+  $('#search').addEventListener('input', e => { S.query = e.target.value; S.anchor = null; applyFilter(); });
+  for (const [type, down] of [['pointerdown', true], ['pointerup', false], ['pointercancel', false]]) {
+    addEventListener(type, () => { pressing = down; }, true);
+  }
+  try { S.preview = localStorage.getItem('subtle-preview') !== '0'; } catch (e) {}
+  $('#prevOn').checked = S.preview;
+  $('#prevOn').onchange = e => {
+    S.preview = e.target.checked;
+    try { localStorage.setItem('subtle-preview', S.preview ? '1' : '0'); } catch (err) {}
+    if (S.detail) renderPreview();
+  };
+  matchMedia('(min-width: 1400px)').addEventListener('change', () => { if (S.detail) renderPreview(); });
+  // What sticks below the top bar needs its height, which grows when the demo notice wraps under it.
+  const bar = $('.top');
+  new ResizeObserver(() => document.documentElement.style.setProperty('--bar', bar.offsetHeight + 'px')).observe(bar);
+  // Once you are looking at the page again, the tab no longer needs to say that the queue finished.
+  const looked = () => { if (resting && !document.hidden && document.hasFocus()) { resting = ''; renderTab(); } };
+  addEventListener('focus', looked);
+  document.addEventListener('visibilitychange', looked);
+  $('#notifyOn').onchange = guard(async e => {
+    let on = e.target.checked;
+    if (on && Notification.permission !== 'granted') on = await Notification.requestPermission() === 'granted';
+    e.target.checked = on;
+    try { localStorage.setItem('subtle-notify', on ? '1' : '0'); } catch (err) {}
+    $('#notifyStatus').textContent = notifyHint();
+  });
 
   $('#keySave').onclick = guard(async () => {
     const key = $('#apiKey').value.trim();

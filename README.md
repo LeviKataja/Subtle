@@ -19,6 +19,7 @@ Finnish; everything else has only met the built-in fake model. What has and has 
 | Part | State |
 |---|---|
 | Translating, the web UI | Covered by the tests and tried by hand. Two live runs on Haiku 5.5: a 936-line film for $0.014, and a fast-talking 1,878-line one for about 5 cents. A native speaker called the first good enough to watch, with some lines that read oddly. Other languages and models are untried. |
+| Line preview, word-level proofreading marks, tab title, notifications, phone layout | The page itself has no tests. These were driven in a headless Chrome on the demo show, at desktop and phone width. Nobody has used them on a real file yet, a real notification has never been seen, and Chrome is the only browser tried. |
 | Proofreading | Covered by the tests. One live run: Sonnet 5.5 reading the 1,878-line translation changed 44 lines for about 21 cents. Whether those were the right 44 has not been judged yet. The default, a model reading its own translation, has not had a live run. |
 | Repair | Covered by the tests. Not looked at in the live runs. |
 | Subtitles inside video files | Tried with real ffmpeg on MKV and MP4 files. Picture-based tracks only with stand-in data. |
@@ -110,7 +111,7 @@ file. That adds about 40% to the estimate, and the estimates in the queue includ
 has the switch to turn it off (`--no-proofread` on the command line) and the choice of another
 model to read. **Proofread** on a file's review screen runs it again, with any model.
 
-![The Proofread tab: six corrected lines, each with its earlier wording struck through beneath](docs/proofread.png)
+![The Proofread tab: six corrected lines, with the words that changed marked in the new wording and in the earlier one beneath it](docs/proofread.png)
 
 - Reading costs less than translating with the same model, because nearly all of it is input.
   A stronger reader still costs more than a cheap translator: in the one live run, Sonnet
@@ -118,8 +119,9 @@ model to read. **Proofread** on a file's review screen runs it again, with any m
   had cost to translate it. The review screen's menu shows an estimate for each model first.
 - A model reading its own work catches less than a stronger one. If a translation reads oddly
   throughout, translating with the stronger model is the surer fix. See the table below.
-- Changed lines are listed under their own tab with the earlier wording shown beneath, and one
-  click puts a line back, or all of them.
+- Changed lines are listed under their own tab with the earlier wording beneath. Only the words
+  that changed are marked, in both; a line rewritten outright has its earlier wording struck
+  through whole. One click puts a line back, or all of them.
 - Lines you edited yourself are never changed. A correction that loses the words, the tags or
   the line limit is thrown away.
 - If the reading fails, the translation is kept and saved as it was.
@@ -175,17 +177,26 @@ to read less naturally than Claude. Try one episode and read it before queueing 
 
 - Queue with a cost estimate per file, live progress and the line currently being translated.
 - **Add a folder** scans a path on disk and writes each translation beside its source.
+- The browser tab's title says how far along the queue is, and that it has finished until you
+  look. **Settings → Notifications** adds a browser notification for that; browsers only allow
+  those on a page opened as localhost or over HTTPS.
 - Review screen: original and translation side by side, filling in as the model streams.
   Click a line to edit it. `Ctrl+Enter` moves to the next line, `Esc` reverts, `/` searches.
+  Formatting tags stay in the text, dimmed, and italics are drawn as italics.
+- The line you select is drawn the way a viewer sees it, with how long it stays on screen set
+  against how long it takes to read at the speed limit. The dashed lines mark the longest line
+  allowed. The **Preview** box switches this off.
 - Lines that fail a check are flagged. **Fix flagged lines** re-sends only those: untranslated
-  ones are redone, lines too long for their time on screen are shortened.
+  ones are redone, lines too long for their time on screen are shortened. With a filter or a
+  search on, selecting a line shows the two before and after it as well.
 - `↻` on any line translates it again, optionally with an instruction ("more casual").
 - **Library** lists the shows and movies Sonarr and Radarr know, with what each video has by
   way of subtitles (see Automation).
+- A free-text note for the translator. Tone, sound-description stripping, lyric handling and
+  the glossary sit behind **Change**, under a line that says what they are set to.
 - Glossary for names and terms. Only entries that occur in a request are sent with it.
-- Tone, sound-description stripping, lyric handling and a free-text note for the translator.
 
-![The review screen: original and translation side by side, one line flagged as too fast to read](docs/review.png)
+![The review screen: the selected line drawn as a viewer sees it, above the original and translation side by side, with that line flagged as too fast to read](docs/review.png)
 
 ## Layout
 

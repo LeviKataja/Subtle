@@ -21,13 +21,23 @@
     </svg>
     <span>Subtle</span>
   </a>
+  <!-- The two pages are tabs; Automation and Settings open dialogs, so they sit apart with icons. -->
+  <nav class="nav" aria-label="Pages">
+    <a href="#/" id="navQueue" aria-current="page">Queue<span class="nav-live" id="navLive" title="Translating now" hidden></span></a>
+    <a href="#/library" id="libBtn">Library</a>
+  </nav>
   <span class="tag" id="mockTag" hidden>Demo mode: fake translations, no API calls</span>
   <div class="grow"></div>
   <div class="spend" id="spend" title="Spent on the files currently in the queue"></div>
   <button class="btn ghost icon" id="themeBtn" aria-label="Switch between light and dark" title="Light / dark"></button>
-  <button class="btn ghost" id="libBtn">Library</button>
-  <button class="btn ghost" id="autoBtn">Automation</button>
-  <button class="btn ghost" id="settingsBtn">Settings</button>
+  <button class="btn ghost lbl" id="autoBtn" title="Automation">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M13 2.5 4.5 13.5h6.5l-1 8 8.5-11.5H12z"/></svg>
+    <span>Automation</span>
+  </button>
+  <button class="btn ghost lbl" id="settingsBtn" title="Settings">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h9M19 6h1M4 12h1M11 12h9M4 18h7M17 18h3"/><circle cx="16" cy="6" r="2.4"/><circle cx="8" cy="12" r="2.4"/><circle cx="14" cy="18" r="2.4"/></svg>
+    <span>Settings</span>
+  </button>
 </header>
 
 <!-- ───────────── Queue ───────────── -->
@@ -47,35 +57,42 @@
       <label id="modelLabel">Model</label>
       <div class="seg" id="models" role="radiogroup" aria-labelledby="modelLabel"></div>
     </div>
-    <div class="field">
-      <label for="register">Tone</label>
-      <select id="register">
-        <option value="auto">Match the scene</option>
-        <option value="informal">Informal</option>
-        <option value="formal">Formal</option>
-      </select>
-    </div>
-    <div class="field">
-      <label for="sdh">Sound descriptions</label>
-      <select id="sdh">
-        <option value="keep">Translate</option>
-        <option value="strip">Remove</option>
-      </select>
-    </div>
-    <div class="field">
-      <label for="lyrics">Song lyrics</label>
-      <select id="lyrics">
-        <option value="keep">Leave as they are</option>
-        <option value="translate">Translate</option>
-      </select>
-    </div>
     <div class="field f-notes">
       <label for="notes">Notes for the translator <span class="opt">optional</span></label>
       <input id="notes" maxlength="400" placeholder="e.g. Crime drama. Inspector Hale is a woman. Keep street names in English.">
     </div>
-    <div class="field f-gloss">
-      <label>&nbsp;</label>
-      <button class="btn" id="glossaryBtn">Glossary</button>
+    <!-- The four options that rarely change: one line says what they are set to, Change shows them. -->
+    <div class="setup-sum">
+      <span id="setupSum"></span>
+      <button class="btn small" type="button" id="setupMoreBtn" aria-expanded="false" aria-controls="setupMore">Change</button>
+    </div>
+    <div class="setup-more" id="setupMore" hidden>
+      <div class="field">
+        <label for="register">Tone</label>
+        <select id="register">
+          <option value="auto">Match the scene</option>
+          <option value="informal">Informal</option>
+          <option value="formal">Formal</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="sdh">Sound descriptions</label>
+        <select id="sdh">
+          <option value="keep">Translate</option>
+          <option value="strip">Remove</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="lyrics">Song lyrics</label>
+        <select id="lyrics">
+          <option value="keep">Leave as they are</option>
+          <option value="translate">Translate</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="glossaryBtn">Names and terms</label>
+        <button class="btn" type="button" id="glossaryBtn">Glossary</button>
+      </div>
     </div>
   </section>
 
@@ -116,17 +133,25 @@
     <div class="tabs" id="rvTabs" role="tablist"></div>
     <div class="grow"></div>
     <label class="check" id="followWrap" hidden><input type="checkbox" id="follow" checked> Follow along</label>
+    <label class="check" title="Draw the line you select the way a viewer sees it"><input type="checkbox" id="prevOn" checked> Preview</label>
     <input id="search" type="search" placeholder="Search lines…  ( / )" aria-label="Search lines">
   </div>
-  <div class="grid-head"><div>#</div><div>Time</div><div>Original</div><div>Translation</div><div></div></div>
-  <div class="rows" id="rows"></div>
-  <div class="empty" id="rowsEmpty" hidden>Nothing matches.</div>
+  <div class="rv-body" id="rvBody">
+    <div class="rv-list">
+      <div class="grid-head"><div>#</div><div>Time</div><div>Original</div><div>Translation</div><div></div></div>
+      <div class="rows" id="rows"></div>
+      <div class="empty" id="rowsEmpty" hidden>Nothing matches.</div>
+    </div>
+    <aside class="prev" id="prev" aria-label="The selected line as a viewer sees it" hidden>
+      <div class="prev-screen" id="prevScreen" title="The dashed lines mark the longest line allowed"><div class="prev-sub" id="prevSub"></div></div>
+      <div class="prev-facts" id="prevFacts"></div>
+    </aside>
+  </div>
 </main>
 
 <!-- ───────────── Library ───────────── -->
 <main id="library" class="page" hidden>
   <div class="rv-head">
-    <a class="back" href="#/">← Queue</a>
     <h1>Library</h1>
     <span class="muted" id="libSummary"></span>
     <div class="grow"></div>
@@ -146,75 +171,126 @@
 
 <!-- ───────────── Dialogs ───────────── -->
 <dialog id="settingsDlg">
-  <form method="dialog" class="dlg">
-    <h2>Settings</h2>
+  <!-- Sections are listed at the side and shown one at a time. Every field is in the page the
+       whole time, so closing the dialog saves all of them, whichever section is showing. -->
+  <form method="dialog" class="set">
+    <nav class="set-side" aria-label="Settings sections">
+      <h2>Settings</h2>
+      <button type="button" data-sec="key">Claude API key</button>
+      <button type="button" data-sec="local">Local model</button>
+      <button type="button" data-sec="spend">Spending</button>
+      <button type="button" data-sec="subs">Subtitles</button>
+      <button type="button" data-sec="proof">Proofreading</button>
+      <button type="button" data-sec="notify">Notifications</button>
+      <button type="button" data-sec="cache">Cache</button>
+    </nav>
+    <div class="set-body">
+      <section data-sec="key">
+        <h2>Claude API key</h2>
+        <p class="muted" id="keyStatus"></p>
+        <div class="inline" id="keyRow">
+          <input type="password" id="apiKey" placeholder="sk-ant-…" autocomplete="off" spellcheck="false" aria-label="Claude API key">
+          <button class="btn" type="button" id="keySave">Save key</button>
+          <button class="btn ghost" type="button" id="keyRemove" hidden>Remove</button>
+        </div>
+        <p class="set-help">Kept in a settings file on this computer. An <code>ANTHROPIC_API_KEY</code> environment variable takes priority if one is set.</p>
+      </section>
 
-    <h3>API key</h3>
-    <p class="muted" id="keyStatus"></p>
-    <div class="inline" id="keyRow">
-      <input type="password" id="apiKey" placeholder="sk-ant-…" autocomplete="off" spellcheck="false">
-      <button class="btn" type="button" id="keySave">Save key</button>
-      <button class="btn ghost" type="button" id="keyRemove" hidden>Remove</button>
+      <section data-sec="local" hidden>
+        <h2>Local model <span class="opt">optional</span></h2>
+        <p class="set-help lead">A model running on your own hardware, offered next to Claude's on the main page: Ollama, LM Studio, llama.cpp, or anything else that speaks the OpenAI chat API. It needs no API key and costs nothing per file. How good the subtitles are depends on the model, and it is slower.</p>
+        <div class="set-form">
+          <div class="set-row">
+            <div class="set-lab"><label for="localUrl">Server address</label></div>
+            <div class="inline"><input id="localUrl" placeholder="http://localhost:11434" spellcheck="false"><button class="btn" type="button" id="localCheck">Look for models</button></div>
+          </div>
+          <div class="set-row">
+            <div class="set-lab"><label for="localModel">Model</label></div>
+            <div class="inline"><input id="localModel" list="localModels" placeholder="e.g. gemma3:12b" autocomplete="off" spellcheck="false"><datalist id="localModels"></datalist></div>
+          </div>
+          <div class="set-row">
+            <div class="set-lab"><label for="localCtx">Context size</label><p class="set-help">Tokens the model is loaded with. Requests are sized to fit; a larger context means fewer, larger requests.</p></div>
+            <div class="inline"><input type="number" id="localCtx" min="2048" step="1024"><span class="unit">tokens</span></div>
+          </div>
+          <div class="set-row">
+            <div class="set-lab"><label for="localKey">API key</label><p class="set-help">Only if the server asks for one.</p></div>
+            <input type="password" id="localKey" autocomplete="off" spellcheck="false">
+          </div>
+        </div>
+        <p class="set-status" id="localStatus"></p>
+      </section>
+
+      <section data-sec="spend" hidden>
+        <h2>Spending</h2>
+        <div class="set-form">
+          <div class="set-row">
+            <div class="set-lab"><label for="budget">Stop a file once it has cost</label><p class="set-help">0 means automatic: four times the estimate.</p></div>
+            <div class="inline"><span class="unit">$</span><input type="number" id="budget" min="0" step="0.05"></div>
+          </div>
+          <div class="set-row">
+            <div class="set-lab"><label for="escalate">Lines the model keeps getting wrong</label></div>
+            <select id="escalate">
+              <option value="">Flag them for me</option>
+              <option value="claude-sonnet-5-5">Retry just those with Sonnet 5.5</option>
+              <option value="claude-opus-5-5">Retry just those with Opus 5.5</option>
+            </select>
+          </div>
+          <div class="set-row">
+            <div class="set-lab"><label for="chunk">Lines per request</label><p class="set-help">Larger means fewer requests and slightly more risk of skipped lines.</p></div>
+            <div class="inline"><input type="number" id="chunk" min="20" max="400" step="10"></div>
+          </div>
+          <div class="set-row">
+            <div class="set-lab"><label for="conc">Files at once</label></div>
+            <div class="inline"><input type="number" id="conc" min="1" max="8"></div>
+          </div>
+        </div>
+      </section>
+
+      <section data-sec="subs" hidden>
+        <h2>Subtitles</h2>
+        <div class="set-form">
+          <div class="set-row">
+            <div class="set-lab"><label for="maxChars">Longest line</label><p class="set-help">Translations are re-wrapped to fit.</p></div>
+            <div class="inline"><input type="number" id="maxChars" min="20" max="80"><span class="unit">characters</span></div>
+          </div>
+          <div class="set-row">
+            <div class="set-lab"><label for="maxCps">Reading speed limit</label><p class="set-help">A line that needs more than this is flagged.</p></div>
+            <div class="inline"><input type="number" id="maxCps" min="8" max="40"><span class="unit">characters per second</span></div>
+          </div>
+        </div>
+        <label class="check"><input type="checkbox" id="saveNext"> Save each translation next to its source file (files added from a folder)</label>
+        <label class="check"><input type="checkbox" id="bilingual"> Keep the original line under each translation</label>
+      </section>
+
+      <section data-sec="proof" hidden>
+        <h2>Proofreading</h2>
+        <p class="set-help lead">A second pass that reads the whole translation at once and corrects only the lines that need it: mistranslated idioms, grammar slips, a name or term translated two ways. It runs after every translation unless you switch it off here; the estimates in the queue include it. The <b>Proofread</b> button on a file's review screen runs it again, with any model.</p>
+        <label class="check"><input type="checkbox" id="proofAuto"> Proofread every file after it is translated</label>
+        <div class="set-form">
+          <div class="set-row">
+            <div class="set-lab"><label for="proofModel">Read by</label></div>
+            <select id="proofModel"></select>
+          </div>
+        </div>
+        <p class="set-help">Proofreading pays off when the reader is stronger than the translator: Haiku translating and Sonnet reading costs less than half of what Sonnet translating does. A reader weaker than the translator can undo good lines.</p>
+      </section>
+
+      <section data-sec="notify" hidden>
+        <h2>Notifications</h2>
+        <p class="set-help lead">The browser tab's title always says how far along the queue is. A notification can also tell you when it has finished.</p>
+        <label class="check"><input type="checkbox" id="notifyOn"> Notify me when the queue has finished</label>
+        <p class="set-help" id="notifyStatus"></p>
+      </section>
+
+      <section data-sec="cache" hidden>
+        <h2>Cache</h2>
+        <p class="set-help lead">Finished chunks are remembered, so repeating a file costs nothing.</p>
+        <button class="btn" type="button" id="cacheClear">Clear cached translations</button>
+        <p class="set-help" id="about"></p>
+      </section>
+
+      <div class="dlg-foot"><button class="btn primary" id="settingsDone" value="ok">Done</button></div>
     </div>
-    <p class="hint">Kept in a settings file on this computer. An <code>ANTHROPIC_API_KEY</code> environment variable takes priority if one is set.</p>
-
-    <h3>Local model <span class="opt">optional</span></h3>
-    <p class="hint">A model running on your own hardware, offered next to Claude's on the main page: Ollama, LM Studio, llama.cpp, or anything else that speaks the OpenAI chat API. It needs no API key and costs nothing per file. How good the subtitles are depends on the model, and it is slower.</p>
-    <div class="form-grid">
-      <label for="localUrl">Server address</label>
-      <div class="inline"><input id="localUrl" placeholder="http://localhost:11434" spellcheck="false"><button class="btn" type="button" id="localCheck">Look for models</button></div>
-      <label for="localModel">Model</label>
-      <div class="inline"><input id="localModel" list="localModels" placeholder="e.g. gemma3:12b" autocomplete="off" spellcheck="false"><datalist id="localModels"></datalist></div>
-      <label for="localCtx">Context size</label>
-      <div class="inline"><input type="number" id="localCtx" min="2048" step="1024"><span class="hint">tokens the model is loaded with. Requests are sized to fit; a larger context means fewer, larger requests</span></div>
-      <label for="localKey">API key</label>
-      <div class="inline"><input type="password" id="localKey" autocomplete="off" spellcheck="false"><span class="hint">only if the server asks for one</span></div>
-    </div>
-    <p class="hint" id="localStatus"></p>
-
-    <h3>Spending</h3>
-    <div class="form-grid">
-      <label for="budget">Stop a file once it has cost</label>
-      <div class="inline"><span class="unit">$</span><input type="number" id="budget" min="0" step="0.05"><span class="hint">0 = automatic: four times the estimate</span></div>
-      <label for="escalate">Lines the model keeps getting wrong</label>
-      <select id="escalate">
-        <option value="">Flag them for me</option>
-        <option value="claude-sonnet-5-5">Retry just those with Sonnet 5.5</option>
-        <option value="claude-opus-5-5">Retry just those with Opus 5.5</option>
-      </select>
-      <label for="chunk">Lines per request</label>
-      <div class="inline"><input type="number" id="chunk" min="20" max="400" step="10"><span class="hint">larger = fewer requests, slightly more risk of skipped lines</span></div>
-      <label for="conc">Files at once</label>
-      <div class="inline"><input type="number" id="conc" min="1" max="8"></div>
-    </div>
-
-    <h3>Subtitles</h3>
-    <div class="form-grid">
-      <label for="maxChars">Longest line</label>
-      <div class="inline"><input type="number" id="maxChars" min="20" max="80"><span class="hint">characters; translations are re-wrapped to fit</span></div>
-      <label for="maxCps">Reading speed limit</label>
-      <div class="inline"><input type="number" id="maxCps" min="8" max="40"><span class="hint">characters per second before a line is flagged</span></div>
-    </div>
-    <label class="check"><input type="checkbox" id="saveNext"> Save each translation next to its source file (files added from a folder)</label>
-    <label class="check"><input type="checkbox" id="bilingual"> Keep the original line under each translation</label>
-
-    <h3>Proofreading</h3>
-    <p class="hint">A second pass that reads the whole translation at once and corrects only the lines that need it: mistranslated idioms, grammar slips, a name or term translated two ways. It runs after every translation unless you switch it off here; the estimates in the queue include it. The <b>Proofread</b> button on a file's review screen runs it again, with any model.</p>
-    <label class="check"><input type="checkbox" id="proofAuto"> Proofread every file after it is translated</label>
-    <div class="form-grid">
-      <label for="proofModel">Read by</label>
-      <div class="inline"><select id="proofModel"></select></div>
-    </div>
-    <p class="hint">Proofreading pays off when the reader is stronger than the translator: Haiku translating and Sonnet reading costs less than half of what Sonnet translating does. A reader weaker than the translator can undo good lines.</p>
-
-    <h3>Cache</h3>
-    <div class="inline">
-      <button class="btn" type="button" id="cacheClear">Clear cached translations</button>
-      <span class="hint">Finished chunks are remembered, so repeating a file costs nothing.</span>
-    </div>
-    <p class="hint" id="about"></p>
-
-    <div class="dlg-foot"><button class="btn primary" id="settingsDone" value="ok">Done</button></div>
   </form>
 </dialog>
 
