@@ -23,7 +23,7 @@ from .model import Document
 from .prep import (Unit, assemble, disassemble, flat, has_words, prepare, ready, strip_dash, wire_text,
                    wire_tgt)
 from .prompt import PROMPT_VERSION, glossary_hits, proof_message, proof_prompt, system_prompt, user_message
-from .providers import MODELS, Cancelled, DEFAULT_MODEL, price
+from .providers import MODELS, Cancelled, DEFAULT_MODEL, is_local, price
 from .wire import StreamParser, parse
 
 
@@ -48,6 +48,7 @@ class Options:
     title: str = ""
     glossary: list = field(default_factory=list)
     budget: float = 0.0
+    local_ctx: int = 4096  # tokens a local model takes in one request
 
     @classmethod
     def from_dict(cls, d: dict, **over) -> "Options":
@@ -73,12 +74,27 @@ class Stats:
             setattr(self, k, getattr(self, k) + getattr(other, k))
 
 
+def request_size(opts: Options, model: str = "") -> tuple[int, int]:
+    """(lines, characters) one translation request may carry.
+
+    Claude gets what the settings ask for. A local model has a small context window, and the
+    lines, their translations and the prompt all have to fit in it, so it gets fewer when
+    that is tight: about 60 lines at a time in a 4,096-token context. The sums assume three
+    characters to a token going in and two coming out, which is on the careful side, and that
+    a chunk can run 30% over its target.
+    """
+    if not is_local(model or opts.model):
+        return opts.chunk_lines, 9000
+    room = max(opts.local_ctx, 2048) - 900  # what is left after the prompt, context lines and glossary
+    return max(8, min(opts.chunk_lines, room // 50)), min(9000, room * 85 // 100)
+
+
 def estimate(doc: Document, opts: Options) -> dict:
     """Rough token and cost forecast, computed locally (no API call)."""
     units, _ = prepare(doc, opts.sdh, opts.lyrics)
     todo = [u for u in units if u.kind == "text"]
     n, chars = len(todo), sum(len(u.src) for u in todo)
-    chunks = math.ceil(n / max(opts.chunk_lines, 1))
+    chunks = math.ceil(n / max(request_size(opts)[0], 1))
     system = system_prompt(opts.target_name or "the target language", opts.source_name, opts.register,
                            opts.notes, opts.title, doc.fmt == "txt")
     inp = chars / 3.3 + n * 3 + chunks * (len(system) / 3.3 + 70)
@@ -131,7 +147,7 @@ class Translator:
 
     def run(self) -> Stats:
         started = time.time()
-        chunks = make_chunks(self.todo, self.units, self.doc, self.opts.chunk_lines)
+        chunks = make_chunks(self.todo, self.units, self.doc, *request_size(self.opts))
         self.emit({"type": "plan", "units": len(self.todo), "chunks": len(chunks), "budget": round(self.budget, 4)})
         context: list[tuple[str, str]] = []
         try:
@@ -357,12 +373,33 @@ def _proofable(cue) -> bool:
     return bool(cue.text.strip() and cue.translation and cue.translation.strip()) and not set(cue.flags) & qa.ERRORS
 
 
-def estimate_proof(doc: Document, opts: Options, model: str = "") -> dict:
-    """Forecast for one proofreading pass: both languages go in, only the corrections come out."""
+def proof_size(opts: Options, model: str) -> tuple[int, int]:
+    """(lines, characters of original) one proofreading request may carry.
+
+    Claude reads an episode or a film in one go. A local model reads as much as fits in its
+    context, so it sees the script a stretch at a time and cannot compare lines far apart.
+    Both languages go in, and room is kept for every line coming back rewritten.
+    """
+    if not is_local(model):
+        return PROOF_LINES, 10 ** 9
+    room = max(opts.local_ctx, 2048) - 900
+    return max(8, min(PROOF_LINES, room // 80)), room * 55 // 100
+
+
+def estimate_proof(doc: Document, opts: Options, model: str = "", planned: bool = False) -> dict:
+    """Forecast for one proofreading pass: both languages go in, only the corrections come out.
+
+    `planned` is for a file that is not translated yet: the translation is then taken to be
+    as long as the original.
+    """
     model = model or opts.model
-    cues = [c for c in doc.cues if _proofable(c)]
+    if planned:
+        cues = [c for c in doc.cues if c.text.strip()]
+        src = tgt = sum(len(flat(c.text)) for c in cues)
+    else:
+        cues = [c for c in doc.cues if _proofable(c)]
+        src, tgt = sum(len(flat(c.text)) for c in cues), sum(len(flat(c.translation)) for c in cues)
     n = len(cues)
-    src, tgt = sum(len(flat(c.text)) for c in cues), sum(len(flat(c.translation)) for c in cues)
     inp = src / 3.3 + tgt / 2.2 + n * 5 + 600
     out = (tgt / 2.2 + n * 3) * 0.1  # one line in ten rewritten
     if MODELS.get(model, {}).get("thinks"):
@@ -371,13 +408,16 @@ def estimate_proof(doc: Document, opts: Options, model: str = "") -> dict:
     return {"lines": n, "inp": int(inp), "out": int(out), "cost": (inp * pin + out * pout) / 1e6}
 
 
-def proofread(doc: Document, opts: Options, provider, model: str = "", emit=None, cancel=None) -> tuple[Stats, dict]:
+def proofread(doc: Document, opts: Options, provider, model: str = "", emit=None, cancel=None,
+              cache=None) -> tuple[Stats, dict]:
     """Read the finished translation once more, whole, and correct only the lines that need it.
 
     The translator works a scene at a time, so it cannot see that a term is rendered two ways an
     hour apart, and it does not get a second look at its own slips. This pass does both. Lines
     edited by hand are shown to the model but never changed, and a correction that breaks a local
-    check (no words, tags lost, far too long) is thrown away. Returns (stats, summary).
+    check (no words, tags lost, far too long) is thrown away. With a `cache`, a reading already
+    paid for (same model, same lines, same translations) is not paid for again.
+    Returns (stats, summary).
     """
     model = model or opts.model
     emit = emit or (lambda event: None)
@@ -392,7 +432,7 @@ def proofread(doc: Document, opts: Options, provider, model: str = "", emit=None
 
     system = proof_prompt(opts.target_name, opts.source_name, opts.register, opts.notes, opts.title)
     cap = opts.budget or estimate_proof(doc, opts, model)["cost"] * 4 + 0.02
-    for ids in make_chunks(listed, tr.units, doc, PROOF_LINES, max_chars=10 ** 9):
+    for ids in make_chunks(listed, tr.units, doc, *proof_size(opts, model)):
         if cancel and cancel():
             raise Cancelled()
         if tr.stats.cost > cap:
@@ -400,11 +440,19 @@ def proofread(doc: Document, opts: Options, provider, model: str = "", emit=None
         us = [tr.units[i] for i in ids]
         sources = [wire_text(u) for u in us]
         user = proof_message(list(zip(sources, (wire_tgt(u) for u in us))), glossary_hits(opts.glossary, sources))
-        reply = provider.complete(model, system, user, cancel=cancel)
-        tr._spend(reply, model)
+        key = cache.key("proofread", PROMPT_VERSION, model, system, user) if cache else None
+        hit = cache.get(key) if key else None
+        if hit and len(hit) == 1:
+            said, cut = hit[0], False
+        else:
+            reply = provider.complete(model, system, user, cancel=cancel)
+            tr._spend(reply, model)
+            said, cut = reply.text, reply.stop == "max_tokens"
+            if key and reply.stop not in ("max_tokens", "refusal"):
+                cache.put(key, [said])
 
         by_cue: dict[int, list[tuple[Unit, str]]] = {}
-        for j, text in parse(reply.text, len(us), reply.stop == "max_tokens").items():
+        for j, text in parse(said, len(us), cut).items():
             u = us[j]
             # The request shows "original => translation", and a reply sometimes repeats that shape
             # instead of giving the correction alone. Only what follows the arrow is the correction.

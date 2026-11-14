@@ -66,7 +66,7 @@ input, select {
 }
 input::placeholder { color: var(--faint); }
 input[type="checkbox"] { width: auto; accent-color: var(--accent); }
-input[type="number"] { width: 90px; }
+input[type="number"] { width: 90px; flex: none; }
 :is(input, select, .btn, [contenteditable], a, .job):focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .check { display: flex; gap: 8px; align-items: center; color: var(--text); margin-top: 8px; cursor: pointer; }
 .inline { display: flex; gap: 8px; align-items: center; }
@@ -107,7 +107,12 @@ input[type="number"] { width: 90px; }
   flex: 1; font: inherit; color: var(--muted); background: transparent; border: 0; border-radius: 6px;
   padding: 5px 8px; cursor: pointer; display: flex; flex-direction: column; align-items: center; line-height: 1.2;
 }
-.seg button small { font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
+/* With a local model there are four. Its name can be any length, so that one gives way. */
+.setup.four .seg button { flex: 0 0 auto; padding: 5px 10px; }
+.setup.four .seg button.local { flex: 1 1 70px; min-width: 0; }
+.seg-name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.setup.four { grid-template-columns: 1fr 2.8fr .95fr .95fr 1fr; }
+.seg button small { font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .seg button[aria-checked="true"] { background: var(--panel2); color: var(--text); box-shadow: inset 0 0 0 1px var(--line2); font-weight: 600; }
 .seg button[aria-checked="true"] small { color: var(--accent); }
 
@@ -232,7 +237,18 @@ body.dragging .drop { border-color: var(--accent); background: var(--accent-soft
 /* ── library ──────────────────────────────────────────── */
 #libSearch { width: 240px; }
 .lib { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
-.lib-row { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto auto; gap: 14px; align-items: center; padding: 10px 14px; border-top: 1px solid var(--line); }
+.lib-row, .lib-head { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto auto; gap: 14px; align-items: center; }
+.lib.shows .lib-row, .lib-head.shows { grid-template-columns: 14px minmax(0, 1fr) 350px 140px; }
+.lib.movies .lib-row, .lib-head.movies { grid-template-columns: 14px minmax(0, 1fr) auto 190px; }
+.lib-row { padding: 10px 14px; border-top: 1px solid var(--line); }
+.lib-head { font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); font-weight: 650; padding: 0 15px 6px; }
+.lib.movies .lib-row > :last-child { justify-self: start; }
+.lib-prog { display: flex; align-items: center; gap: 9px; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 0; }
+.lib-prog .bar { width: 84px; flex: none; }
+.lib-prog b { color: var(--text); font-weight: 600; }
+.lib-prog.wait, .lib-prog .by { color: var(--faint); font-size: 12.5px; }
+.made { color: var(--faint); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+#libOnly button { font-size: 13px; }
 .lib-row:first-child { border-top: 0; }
 .lib-row.show { cursor: pointer; }
 .lib-row.show:hover, .lib-row.show:focus-visible { background: var(--panel2); outline: none; }
@@ -245,12 +261,13 @@ body.dragging .drop { border-color: var(--accent); background: var(--accent-soft
 .lib-eps { padding: 2px 14px 14px 42px; border-top: 1px solid var(--line); background: var(--bg); }
 .lib-sum { display: flex; align-items: center; gap: 12px; padding: 10px 0 2px; color: var(--muted); font-size: 13px; }
 .lib-season { font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); font-weight: 650; margin: 12px 0 4px; }
-.lib-ep { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 10px; align-items: baseline; padding: 4px 0; }
+.lib-ep { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto auto; gap: 10px; align-items: baseline; padding: 4px 0; }
 .lib-ep .num { color: var(--faint); font-family: var(--mono); font-size: 12px; }
 .lib-ep .what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .why { color: var(--muted); font-size: 12.5px; font-weight: 400; margin-left: 10px; }
 .lib-empty { padding: 28px; text-align: center; color: var(--muted); }
 .badge.green { background: var(--accent-soft); color: var(--accent); }
+.badge.green.solid { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
 .rv-note .btn { margin-left: 8px; }
 
 /* ── dialogs ──────────────────────────────────────────── */
@@ -262,6 +279,7 @@ dialog::backdrop { background: rgba(5, 8, 12, .6); }
 .dlg-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 24px; }
 .form-grid { display: grid; grid-template-columns: 220px 1fr; gap: 10px 14px; align-items: center; }
 .form-grid > label { color: var(--muted); }
+.dlg p + .form-grid { margin-top: 10px; }
 .unit { color: var(--muted); }
 .gl-head, .gl-row { display: grid; grid-template-columns: 1fr 1fr 34px; gap: 8px; margin-top: 8px; }
 .gl-head { font-size: 12px; color: var(--muted); margin-top: 16px; }
@@ -312,6 +330,11 @@ dialog::backdrop { background: rgba(5, 8, 12, .6); }
   .row .meta { justify-content: flex-start; margin-top: 4px; }
   .form-grid { grid-template-columns: 1fr; }
   .spend { display: none; }
+  .lib-head { display: none; }
+  .lib.shows .lib-row, .lib.movies .lib-row { grid-template-columns: 14px minmax(0, 1fr) auto; }
+  .lib.shows .lib-row .lib-auto, .made, .lib-prog .by { display: none; }
+  .setup.four { grid-template-columns: 1fr 1fr; }
+  .rv-bar { flex-wrap: wrap; }
 }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 

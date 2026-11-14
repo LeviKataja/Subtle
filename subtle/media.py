@@ -148,12 +148,19 @@ def extract(path: Path | str, track: dict) -> bytes:
     return data
 
 
-def sidecars(video: Path) -> list[tuple[Path, list[str]]]:
-    """Subtitle files that belong to this video, with the tags between its name and the extension."""
+def sidecars(video: Path, seen: dict | None = None) -> list[tuple[Path, list[str]]]:
+    """Subtitle files that belong to this video, with the tags between its name and the extension.
+
+    `seen` remembers folder listings between calls, for looking at a whole season in one go.
+    """
     out = []
     prefix = video.stem.lower() + "."
     try:
-        siblings = sorted(video.parent.iterdir())
+        siblings = seen.get(video.parent) if seen is not None else None
+        if siblings is None:
+            siblings = sorted(video.parent.iterdir())
+            if seen is not None:
+                seen[video.parent] = siblings
     except OSError:
         return out
     for p in siblings:
@@ -162,11 +169,11 @@ def sidecars(video: Path) -> list[tuple[Path, list[str]]]:
     return out
 
 
-def find_sidecar(video: Path, source: str = "en") -> Path | None:
+def find_sidecar(video: Path, source: str = "en", seen: dict | None = None) -> Path | None:
     """A subtitle file next to the video in the source language (or with no language tag at all)."""
     want = variants(source)
     best = None
-    for path, tags in sidecars(video):
+    for path, tags in sidecars(video, seen):
         if any(t not in want and t not in _HINTS for t in tags):
             continue  # another language, or forced
         rank = (any(t in want for t in tags), not any(t in _HINTS for t in tags), path.suffix.lower() == ".srt")

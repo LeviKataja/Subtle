@@ -1,8 +1,9 @@
 # Subtle
 
 Translates subtitle files (`.srt`, `.vtt`, `.ass`/`.ssa`) and plain `.txt` with Claude, built
-to send as few tokens as it can: an estimated cent or so an episode on the default model.
-Local web UI plus a command line.
+to send as few tokens as it can: an estimated cent or so an episode on the default model,
+proofreading included. It can also use a model running on your own machine. Local web UI plus
+a command line.
 
 ![Three episodes are queued and translated; one is opened while its lines fill in](docs/translate.gif)
 
@@ -18,10 +19,12 @@ Finnish; everything else has only met the built-in fake model. What has and has 
 | Part | State |
 |---|---|
 | Translating, the web UI | Covered by the tests and tried by hand. Two live runs on Haiku 5.5: a 936-line film for $0.014, and a fast-talking 1,878-line one for about 5 cents. A native speaker called the first good enough to watch, with some lines that read oddly. Other languages and models are untried. |
-| Proofreading | Covered by the tests. One live run: Sonnet 5.5 reading the 1,878-line translation changed 44 lines for about 21 cents. Whether those were the right 44 has not been judged yet. |
+| Proofreading | Covered by the tests. One live run: Sonnet 5.5 reading the 1,878-line translation changed 44 lines for about 21 cents. Whether those were the right 44 has not been judged yet. The default, a model reading its own translation, has not had a live run. |
 | Repair | Covered by the tests. Not looked at in the live runs. |
 | Subtitles inside video files | Tried with real ffmpeg on MKV and MP4 files. Picture-based tracks only with stand-in data. |
-| Sonarr, Radarr, Bazarr, the Library page | Written against their source and tested against stand-ins. Not tried with real instances. |
+| Sonarr, Radarr, the Library page | Written against their source and tested against stand-ins. One user has since run them against a real Sonarr and Radarr and reports that it works; which parts that covered is not recorded. |
+| Bazarr | Written against its source and tested against a stand-in. Not tried with a real instance. |
+| Local models | Written against Ollama's documentation and the OpenAI chat format, and tested against a stand-in server. Never run against a real Ollama, LM Studio or llama.cpp, and nobody has looked at what a local model makes of a subtitle file. |
 | Dockerfile | Never built. |
 
 Start with one file and a low spending cap, and read the result before trusting it with a library.
@@ -38,7 +41,8 @@ python -m subtle
 
 That opens the UI at http://localhost:8756. The first time, a setup screen asks for an
 Anthropic API key (or set `ANTHROPIC_API_KEY`) and a language, and offers to connect Sonarr
-and Radarr. After that: drop files, press **Translate**.
+and Radarr. After that: drop files, press **Translate**. Without a key, a model on your own
+machine can do the work instead: see Local models.
 
 <img src="docs/setup.png" width="520" alt="The setup screen: API key, language, and optional Sonarr and Radarr connections">
 
@@ -64,7 +68,8 @@ Folders are searched recursively. Output lands next to each source as `name.<lan
 (`Show.S01E01.en.srt` becomes `Show.S01E01.fi.srt`), which is what Jellyfin and Plex pick up.
 Existing translations are skipped unless you pass `--force`. `--help` lists the rest
 (`--model`, `--sdh strip`, `--register`, `--notes`, `--bilingual`, `--budget`, `--out`,
-`--proofread`, `--proofread-model sonnet`).
+`--no-proofread`, `--proofread-model sonnet`). `--model local` uses the local model from the
+settings.
 
 ## Why it is cheap
 
@@ -74,7 +79,7 @@ Existing translations are skipped unless you pass `--force`. `--help` lists the 
 | Prompt | Roughly 300 tokens, sent once per ~120 lines. |
 | Free work | Tags, positions, line breaks, music symbols, number-only lines and (optionally) sound descriptions are handled locally and never sent. |
 | Model | Haiku 5.5 with reasoning switched off. Sonnet and Opus are one click away and run at low effort. |
-| Checking | Done locally: every line number must come back with words in it, plus reading speed, line length, leftover English and tag checks. A second model pass exists but is optional (see Proofreading). |
+| Checking | Done locally: every line number must come back with words in it, plus reading speed, line length, leftover English and tag checks. One more request then reads the finished file through and sends back only corrections (see Proofreading). |
 | Repair | Only the lines that came back wrong are re-sent, with a neighbour either side. Requests are capped per chunk. |
 | Cache | A finished chunk is never paid for twice: stop, resume, re-run or change one glossary entry and only the affected chunks are sent. |
 | Spend cap | Each file stops at four times its estimate (or a dollar figure you set). |
@@ -83,43 +88,49 @@ Estimates for a 45-minute episode of about 700 lines, from the built-in estimato
 translations (see Status) cost more than estimated: a fifth more for one film, and between one
 and a half times and double for the other:
 
-| Model | Per episode |
-|---|---|
-| Haiku 5.5 | about $0.01 |
-| Sonnet 5.5 | about $0.20 |
-| Opus 5.5 | about $0.40 |
+| Model | Translating | With the same model proofreading (the default) |
+|---|---|---|
+| Haiku 5.5 | about $0.008 | about $0.011 |
+| Sonnet 5.5 | about $0.18 | about $0.24 |
+| Opus 5.5 | about $0.36 | about $0.48 |
 
-The UI shows the estimate before you start and the real token counts and cost as it runs.
+The UI shows the estimate before you start, proofreading included, and the real token counts
+and cost as it runs.
 
 ## Proofreading
 
 The translator works a scene at a time, so it cannot notice that it called the same thing by two
-different words an hour apart, and it never gets a second look at its own slips. **Proofread** on
-a file's review screen sends the whole translation, original beside it, in one request, and gets
-back only the lines that should change: an idiom translated word for word, a wrong inflection, a
-term that changed half way through.
+different words an hour apart, and it never gets a second look at its own slips. So every
+finished translation is read once more: the whole of it goes out in one request, original
+beside it, and only the lines that should change come back: an idiom translated word for word,
+a wrong inflection, a term that changed half way through.
+
+This runs after every translation, automatic ones included, with the model that translated the
+file. That adds about 40% to the estimate, and the estimates in the queue include it. Settings
+has the switch to turn it off (`--no-proofread` on the command line) and the choice of another
+model to read. **Proofread** on a file's review screen runs it again, with any model.
 
 ![The Proofread tab: six corrected lines, each with its earlier wording struck through beneath](docs/proofread.png)
 
-- You choose which model reads, and see the estimate before it starts. Reading costs less than
-  translating with the same model, because nearly all of it is input. A stronger reader still
-  costs more than a cheap translator: in the one live run, Sonnet reading the 1,878-line film
-  cost about 21 cents (the estimate said 22), four times what Haiku had cost to translate it.
+- Reading costs less than translating with the same model, because nearly all of it is input.
+  A stronger reader still costs more than a cheap translator: in the one live run, Sonnet
+  reading the 1,878-line film cost about 21 cents (the estimate said 22), four times what Haiku
+  had cost to translate it. The review screen's menu shows an estimate for each model first.
 - A model reading its own work catches less than a stronger one. If a translation reads oddly
   throughout, translating with the stronger model is the surer fix. See the table below.
 - Changed lines are listed under their own tab with the earlier wording shown beneath, and one
   click puts a line back, or all of them.
 - Lines you edited yourself are never changed. A correction that loses the words, the tags or
   the line limit is thrown away.
-- Settings can run it after every translation, which also covers automatic ones.
+- If the reading fails, the translation is kept and saved as it was.
 
 Which model translates and which one reads, for the 936-line film in Status. The costs in the
 table are estimates, and the order of quality is what to expect, not something measured yet:
 
 | Translated by | Read by | Cost | |
 |---|---|---|---|
-| Haiku | nobody | $0.01 | The default. Good enough to watch, with some lines that read oddly. |
-| Haiku | Haiku | $0.02 | Catches slips and a term translated two ways. Tends to miss what it misunderstood the first time. |
+| Haiku | nobody | $0.01 | Proofreading switched off. Good enough to watch, with some lines that read oddly. |
+| Haiku | Haiku | $0.02 | The default. Catches slips and a term translated two ways. Tends to miss what it misunderstood the first time. |
 | Haiku | Sonnet | $0.11 | The recommended step up: the stronger reader also catches misread idioms. |
 | Sonnet | nobody | $0.27 | Better phrasing on every line, not only the corrected ones. |
 | Sonnet | Sonnet | $0.37 | The same, made consistent across the whole film. |
@@ -132,6 +143,31 @@ so far.
 The review screen marks the recommended reader for each file and warns about a weaker one.
 
 <img src="docs/proofread-menu.png" width="440" alt="The Proofread menu: three models with an estimate each, the next one up from the translator marked as recommended">
+
+## Local models
+
+A model on your own hardware can translate, proofread, or both, with no API key and nothing to
+pay per file. **Settings → Local model** takes the server's address; **Look for models** lists
+what it has. The one you pick then sits next to Claude's models on the main page.
+
+- **Ollama** (`http://localhost:11434`) is spoken to through its own API. Each request says how
+  much context it needs and asks for no reasoning.
+- **Anything else that speaks the OpenAI chat API**: LM Studio (`http://localhost:1234`),
+  llama.cpp's server, vLLM. There the context is whatever the model was loaded with, so set
+  **Context size** in Settings to match it.
+- Requests are sized to fit the context: about 60 lines at a time in 4,096 tokens, the full 120
+  from about 7,000 up. A larger context means fewer requests and more of the scene in view.
+- Proofreading with a local model reads the script a stretch at a time, for the same reason,
+  so it cannot compare lines that are far apart. A Claude model can read what a local one
+  translated, and the other way round.
+- One request goes out at a time, and **Stop** works while the model is still thinking.
+- With only a local model, `pip install anthropic` can be skipped: Subtle itself needs nothing
+  beyond Python.
+
+None of this has met a real server yet (see Status), and how well a given model translates into
+a given language is a separate question from whether the plumbing works. Expect a small model
+to be slower, to skip or merge more lines (those are re-asked and, failing that, flagged), and
+to read less naturally than Claude. Try one episode and read it before queueing a season.
 
 ## What the UI does
 
@@ -166,11 +202,11 @@ subtle/
   media.py      subtitles for a video: sidecar file, or a track pulled out with ffmpeg
   arr.py        Sonarr/Radarr API (connect, add the webhook, list the library), path mapping, Bazarr API
   library.py    what each video has, and the record of the subtitle files Subtle wrote
-  providers.py  Claude (and the offline mock used by tests and --mock)
+  providers.py  Claude, local model servers (and the offline mock used by tests and --mock)
   cache.py      sqlite cache of finished chunks
   server.py     local web server (standard library only)
   web/          the UI (no build step)
-tests/          python -m unittest discover -s tests
+tests/          python -m unittest discover -s tests   (offline: stand-ins for every outside service)
 docs/           the pictures on this page
 ```
 
@@ -209,15 +245,20 @@ field for the right one. To add the webhook by hand instead, **Automation** has 
 
 ### The Library page
 
-Once Sonarr or Radarr is connected, **Library** lists their shows and movies. Unfold a show to
-see each episode: it has subtitles in your language, it was translated by Subtle, it is missing
-them, or there is nothing to translate from.
+Once Sonarr or Radarr is connected, **Library** lists their shows and movies. Each show says
+how many of its episodes have subtitles in your language and how many of those Subtle
+translated; the counts fill in a few shows at a time after the page opens. Unfold a show to see
+each episode: it has subtitles in your language, it was translated by Subtle (with the model,
+the cost and the date), it is in the queue, it is missing them, or there is nothing to
+translate from.
 
-![The Library page: one show unfolded, its episodes marked as having subtitles, translated by Subtle, missing, or with nothing to translate from](docs/library.png)
+![The Library page: each show with a bar for how many episodes have subtitles, one show unfolded with its episodes marked as having subtitles, translated by Subtle, missing, or with nothing to translate from](docs/library.png)
 
+- **Missing** and **Translated by Subtle** above the list narrow it to the shows or movies
+  that have any of either.
 - **Add missing to the queue** puts those episodes or movies in the queue with an estimate
   each. Nothing is spent until you press Translate there. Each translation is saved beside its
-  video.
+  video, and the page follows along as they finish.
 - **New episodes** on a show turns on automatic translation for that show. There is one switch
   for every show and one for new movies. All of them start off.
 - What a video has is read from its folder every time, so the page stays right when files are
@@ -273,7 +314,10 @@ mid-way; the next import or **Add a folder** will catch it.
 ## Not included
 
 - Speech-to-text. A video with no text subtitles in the source language cannot be translated.
-- Other model providers. `providers.py` is the seam: anything with a `complete()` method works.
+- Other hosted model providers. The Local model setting speaks the OpenAI chat format, so one
+  that offers it may work when entered there, but only servers on your own machine were in
+  mind and none of either kind has been tried. `providers.py` is the seam: anything with a
+  `complete()` method works.
 
 ## Security
 
@@ -284,8 +328,11 @@ Subtle is meant for your own machine or home network, not the open internet.
   under any folder it can read, and spend your API credit.
 - The password is HTTP Basic over plain HTTP. Beyond a network you trust, put Subtle behind a
   reverse proxy that adds HTTPS.
-- The Claude, Sonarr, Radarr and Bazarr API keys are stored unencrypted in `config.json` in the
-  data folder (`~/.subtle` by default). Protect that folder as you would the keys.
+- The Claude, Sonarr, Radarr and Bazarr API keys, and a local model server's if it has one, are
+  stored unencrypted in `config.json` in the data folder (`~/.subtle` by default). Protect that
+  folder as you would the keys.
+- With a local model, the subtitle text goes to the server address you entered and nowhere
+  else. Enter the address of a machine you trust.
 - Webhook URLs carry a secret in the query string, so it is visible in Sonarr's and Radarr's
   settings and may appear in their logs.
 - The server reads subtitle and video files from the paths it is given and writes

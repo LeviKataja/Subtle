@@ -18,7 +18,7 @@ def make_chunks(ids: list[int], units: list[Unit], doc: Document,
     chunks: list[list[int]] = []
     start, n = 0, len(ids)
     while start < n:
-        if n - start <= int(target * 1.3):
+        if n - start <= int(target * 1.3) and sum(len(units[i].src) + 4 for i in ids[start:]) <= max_chars:
             chunks.append(ids[start:])
             break
         lo, hi = start + max(1, int(target * 0.6)), min(start + int(target * 1.25), n - 1)

@@ -1,10 +1,15 @@
 """Model backends. The engine only needs `complete()`; everything else stays in here."""
 from __future__ import annotations
 
+import http.client
+import json
 import re
+import socket
+import threading
 import time
 from dataclasses import dataclass
 from typing import Callable
+from urllib.parse import urlsplit
 
 # Prices are USD per million tokens (Anthropic first-party rates, checked 2026-11).
 # `kwargs` keeps each model from spending tokens on reasoning a translation does not need:
@@ -28,6 +33,11 @@ MODELS: dict[str, dict] = {
 }
 ALIASES = {"haiku": "claude-haiku-5-5", "sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}
 DEFAULT_MODEL = "claude-haiku-5-5"
+LOCAL = "local:"  # a model id that starts like this names a model on the local server, e.g. local:gemma3:12b
+
+
+def is_local(model: str) -> bool:
+    return (model or "").startswith(LOCAL)
 
 
 def price(model: str) -> tuple[float, float]:
@@ -57,7 +67,10 @@ class Cancelled(Exception):
 
 class AnthropicProvider:
     def __init__(self, api_key: str | None = None):
-        import anthropic
+        try:
+            import anthropic
+        except ImportError as e:  # a setup that only ever used a local model may not have it
+            raise ProviderError("auth", "Claude's models need the anthropic package: pip install anthropic") from e
 
         self._sdk = anthropic
         try:
@@ -129,6 +142,288 @@ class AnthropicProvider:
         return Completion("".join(parts), message.stop_reason or "", u.input_tokens or 0, u.output_tokens or 0,
                           getattr(u, "cache_read_input_tokens", 0) or 0,
                           getattr(u, "cache_creation_input_tokens", 0) or 0)
+
+
+_THINK = re.compile(r"<think>.*?(?:</think>|$)", re.S)
+
+
+def _visible(raw: str) -> str:
+    """What has arrived so far, without reasoning blocks and without a tag that is only half here."""
+    text = _THINK.sub("", raw)
+    for n in range(min(6, len(text)), 0, -1):
+        if "<think>".startswith(text[-n:]):
+            return text[:-n]
+    return text
+
+
+def _said(raw: bytes) -> str:
+    """The message out of an error body: {"error": "..."} (Ollama) or {"error": {"message": "..."}}."""
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return raw.decode("utf-8", "replace").strip()[:200]
+    if not isinstance(data, dict):
+        return ""
+    err = data.get("error")
+    if isinstance(err, dict):
+        err = err.get("message")
+    return str(err or data.get("message") or "")[:300]
+
+
+class _Refused(Exception):
+    """The server answered with an HTTP error."""
+
+    def __init__(self, status: int, body: bytes):
+        super().__init__(status)
+        self.status, self.said = status, _said(body)
+
+
+class LocalProvider:
+    """A model on your own hardware.
+
+    Ollama is spoken to through its own API, anything else through the OpenAI-style chat API
+    (LM Studio, llama.cpp, vLLM, ...). Ollama gets its own path because only there can a
+    request say how much context it needs and that it wants no reasoning: through its
+    OpenAI-style route a long prompt is silently cut down to the server's default context.
+    Requests go out one at a time, which is all such a server does anyway.
+    """
+
+    TIMEOUT = 600  # seconds without a byte; loading a model and reading a prompt on a CPU is slow
+
+    def __init__(self, url: str, key: str = "", ctx: int = 4096):
+        base = url.strip().rstrip("/")
+        if base and "://" not in base:
+            base = "http://" + base
+        for tail in ("/chat/completions", "/api/chat", "/api"):
+            if base.lower().endswith(tail):
+                base = base[:-len(tail)]
+        self.v1 = base if base.lower().endswith("/v1") else base + "/v1"
+        self.root = self.v1[:-3]
+        self.key, self.ctx = key.strip(), max(int(ctx or 0), 2048)
+        self.kind = ""  # ollama | openai, found out on first use
+        self._gate = threading.Lock()
+        self._skip: dict[str, int] = {}  # per model: optional request fields it turned down
+
+    # --- plumbing -----------------------------------------------------------
+
+    def _call(self, url: str, body: dict | None, handle, cancel=None, timeout: float | None = None):
+        """One request. `handle(response)` reads the answer; `cancel` turning true drops the connection."""
+        parts = urlsplit(url)
+        cls = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
+        conn = cls(parts.netloc, timeout=timeout or self.TIMEOUT)
+        finished = threading.Event()
+
+        def watch() -> None:  # a blocked read cannot look at `cancel` itself
+            while not finished.wait(0.3):
+                if cancel():
+                    sock = conn.sock
+                    try:
+                        if sock:
+                            sock.shutdown(socket.SHUT_RDWR)  # wakes a blocked read on Linux and macOS
+                    except OSError:
+                        pass
+                    try:
+                        if sock:
+                            socket.close(sock.detach())  # ...and closing it under the read does on Windows
+                    except OSError:
+                        pass
+                    return
+
+        if cancel:
+            threading.Thread(target=watch, daemon=True).start()
+        headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        if self.key:
+            headers["Authorization"] = "Bearer " + self.key
+        try:
+            conn.request("POST" if body is not None else "GET", parts.path + ("?" + parts.query if parts.query else ""),
+                         body=json.dumps(body).encode("utf-8") if body is not None else None, headers=headers)
+            res = conn.getresponse()
+            if res.status >= 400:
+                raise _Refused(res.status, res.read(4000))
+            return handle(res)
+        except (Cancelled, ProviderError, _Refused):
+            raise
+        except (OSError, http.client.HTTPException, ValueError) as e:
+            if cancel and cancel():
+                raise Cancelled() from e
+            if isinstance(e, TimeoutError):
+                raise ProviderError("network", f"The local model at {self.root} did not answer within "
+                                               f"{int(timeout or self.TIMEOUT) // 60 or 1} minutes.") from e
+            if isinstance(e, ValueError):
+                raise ProviderError("api", f"{self.root} answered, but not like a model server does.") from e
+            raise ProviderError("network", f"Could not reach a model server at {self.root} ({e}). Is it running?") from e
+        finally:
+            finished.set()
+            conn.close()
+
+    def describe(self) -> dict:
+        """What is at the address: {"kind": "ollama" | "openai", "models": [names]}."""
+        def body(res):
+            return json.loads(res.read())
+
+        try:
+            data = self._call(self.root + "/api/tags", None, body, timeout=15)
+            if isinstance(data, dict) and isinstance(data.get("models"), list):
+                self.kind = "ollama"
+                names = [str(m.get("name") or m.get("model") or "") for m in data["models"] if isinstance(m, dict)]
+                return {"kind": "ollama", "models": sorted(n for n in names if n)}
+        except _Refused:
+            pass  # not Ollama: ask the OpenAI way
+        except ProviderError as e:
+            if e.kind == "network":
+                raise
+        try:
+            data = self._call(self.v1 + "/models", None, body, timeout=15)
+        except _Refused as e:
+            if e.status in (401, 403):
+                raise ProviderError("auth", f"The server at {self.root} wants an API key, or rejected this one.") from e
+            raise ProviderError("api", f"Something answers at {self.root}, but it does not list models the way "
+                                       "Ollama or an OpenAI-style server does. Is that the right address?") from e
+        items = data.get("data") if isinstance(data, dict) else data
+        if not isinstance(items, list):
+            raise ProviderError("api", f"{self.root} answered, but not like a model server does.")
+        self.kind = "openai"
+        return {"kind": "openai", "models": sorted(str(m["id"]) for m in items if isinstance(m, dict) and m.get("id"))}
+
+    # --- one completion -----------------------------------------------------
+
+    def complete(self, model: str, system: str, user: str,
+                 on_text: Callable[[str], None] | None = None,
+                 cancel: Callable[[], bool] | None = None, max_tokens: int = 16000) -> Completion:
+        while not self._gate.acquire(timeout=0.3):
+            if cancel and cancel():
+                raise Cancelled()
+        try:
+            if not self.kind:
+                try:
+                    self.describe()
+                except ProviderError as e:
+                    if e.kind != "api":
+                        raise
+                    self.kind = "openai"  # no model list to go by; the chat route may still be there
+            room = max(256, min(max_tokens, self.ctx // 2))  # the reply has to fit in the context too
+            messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+            if self.kind == "ollama":
+                base = {"model": model, "stream": True, "messages": messages,
+                        "options": {"num_ctx": self.ctx, "num_predict": room, "temperature": 0.3}}
+                url, variants = self.root + "/api/chat", [{**base, "think": False}, base]
+            else:
+                base = {"model": model, "stream": True, "messages": messages, "max_tokens": room}
+                url = self.v1 + "/chat/completions"
+                variants = [{**base, "temperature": 0.3, "stream_options": {"include_usage": True}},
+                            {**base, "temperature": 0.3}, base]
+            i = min(self._skip.get(model, 0), len(variants) - 1)
+            while True:
+                try:
+                    done = self._call(url, variants[i], lambda res: self._read(res, on_text, cancel), cancel)
+                    break
+                except _Refused as e:
+                    if e.status in (400, 422) and i + 1 < len(variants):
+                        i += 1  # an optional field this server or model does not take: drop it and remember
+                        self._skip[model] = i
+                        continue
+                    if e.status in (401, 403):
+                        raise ProviderError("auth", "The local model server wants an API key, or rejected this one.") from e
+                    if e.status == 404:
+                        raise ProviderError("model", f"The server at {self.root} has no model called {model}"
+                                                     + (f" ({e.said})." if e.said else ".")) from e
+                    raise ProviderError("api", f"The local model server answered {e.status}"
+                                               + (f": {e.said}" if e.said else ".")) from e
+            if not done.inp:
+                done.inp = (len(system) + len(user)) // 3
+            if not done.out:
+                done.out = len(done.text) // 3
+            return done
+        finally:
+            self._gate.release()
+
+    def _read(self, res, on_text, cancel) -> Completion:
+        """Collect a streamed reply: one JSON object per line (Ollama) or `data:` lines (OpenAI style)."""
+        raw, sent, stop, inp, out, plain = "", 0, "end_turn", 0, 0, []
+        for line in res:
+            if cancel and cancel():
+                raise Cancelled()
+            line = line.decode("utf-8", "replace").strip()
+            if line.startswith("data:"):
+                line = line[5:].strip()
+            elif self.kind != "ollama":
+                plain.append(line)  # not a stream after all: put the body back together below
+                continue
+            if not line or line == "[DONE]":
+                continue
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            piece, last = self._piece(obj)
+            if last.get("stop"):
+                stop = last["stop"]
+            inp, out = last.get("inp") or inp, last.get("out") or out
+            if piece:
+                raw += piece
+                shown = _visible(raw)
+                if on_text and len(shown) > sent:
+                    on_text(shown[sent:])
+                sent = max(sent, len(shown))
+        if cancel and cancel():
+            raise Cancelled()  # the dropped connection reads as an ordinary end of the reply
+        if not raw and plain:
+            try:
+                piece, last = self._piece(json.loads("".join(plain)))
+            except ValueError:
+                piece, last = "", {}
+            raw, stop = piece, last.get("stop") or stop
+            inp, out = last.get("inp") or inp, last.get("out") or out
+        text = _THINK.sub("", raw)
+        if on_text and len(text) > sent:
+            on_text(text[sent:])
+        return Completion(text, stop, inp, out)
+
+    @staticmethod
+    def _piece(obj) -> tuple[str, dict]:
+        """(text in this part of the reply, what it says about how the reply ended)."""
+        if not isinstance(obj, dict):
+            return "", {}
+        if obj.get("error"):
+            raise ProviderError("api", "The local model reported: " + (_said(json.dumps(obj).encode()) or "an error"))
+        last: dict = {}
+        if "choices" in obj or "usage" in obj:  # OpenAI style
+            choice = (obj.get("choices") or [{}])[0] or {}
+            part = choice.get("delta") or choice.get("message") or {}
+            if choice.get("finish_reason") == "length":
+                last["stop"] = "max_tokens"
+            usage = obj.get("usage") or {}
+            last["inp"], last["out"] = int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0)
+            return str(part.get("content") or ""), last
+        if obj.get("done"):
+            last["inp"], last["out"] = int(obj.get("prompt_eval_count") or 0), int(obj.get("eval_count") or 0)
+            if obj.get("done_reason") == "length":
+                last["stop"] = "max_tokens"
+        return str((obj.get("message") or {}).get("content") or ""), last
+
+
+class Router:
+    """Sends each request to the backend its model belongs to: Claude, or the local server.
+
+    One file can then be translated by one and proofread by the other. Claude's client is only
+    made when a Claude model is first asked for, so a local model needs no API key at all.
+    """
+
+    def __init__(self, api_key: str | None = None, local: dict | None = None):
+        self._key, self._claude, self._lock = api_key, None, threading.Lock()
+        self.local = LocalProvider(local["url"], local.get("key", ""), local.get("ctx", 4096)) \
+            if local and local.get("url") else None
+
+    def complete(self, model: str, system: str, user: str, on_text=None, cancel=None,
+                 max_tokens: int = 16000) -> Completion:
+        if is_local(model):
+            if not self.local:
+                raise ProviderError("model", "No local model server is set up. Add its address in Settings.")
+            return self.local.complete(model[len(LOCAL):], system, user, on_text, cancel, max_tokens)
+        with self._lock:
+            if self._claude is None:
+                self._claude = AnthropicProvider(self._key)
+        return self._claude.complete(model, system, user, on_text, cancel, max_tokens)
 
 
 _PSEUDO = str.maketrans("aeiouAEIOU", "áéíöüÁÉÍÖÜ")
@@ -209,6 +504,13 @@ class MockProvider:
         return Completion(text, "end_turn", inp, len(text) // 3)
 
 
-def build(api_key: str | None = None, mock: bool = False):
-    """The provider to use: the offline mock when asked for, otherwise Claude."""
-    return MockProvider(delay=0.03) if mock else AnthropicProvider(api_key)
+def local_settings(cfg: dict) -> dict | None:
+    """The local server out of the settings, as `build` wants it (None when there is none)."""
+    if not (cfg.get("local_url") or "").strip():
+        return None
+    return {"url": cfg["local_url"], "key": cfg.get("local_key") or "", "ctx": cfg.get("local_ctx") or 4096}
+
+
+def build(api_key: str | None = None, mock: bool = False, local: dict | None = None):
+    """The provider to use: the offline mock when asked for, otherwise Claude and any local server."""
+    return MockProvider(delay=0.03) if mock else Router(api_key, local)

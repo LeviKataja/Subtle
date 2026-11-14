@@ -33,7 +33,7 @@
 <!-- ───────────── Queue ───────────── -->
 <main id="home" class="page">
   <div class="banner" id="keyBanner" hidden>
-    <div><strong>No API key yet.</strong> Subtle needs an Anthropic API key to translate. You can look around without one.</div>
+    <div><strong>No API key yet.</strong> Subtle needs an Anthropic API key to translate with Claude, or a model running on your own machine (Settings). You can look around without either.</div>
     <button class="btn" id="keyBannerBtn">Set up</button>
   </div>
 
@@ -136,9 +136,11 @@
   <div class="rv-note" id="libNote" hidden></div>
   <div class="rv-bar">
     <div class="tabs" id="libTabs" role="tablist"></div>
+    <div class="tabs" id="libOnly" role="tablist" aria-label="Which ones to list"></div>
     <div class="grow"></div>
     <div id="libTools" class="inline"></div>
   </div>
+  <div class="lib-head" id="libHead"></div>
   <div class="lib" id="libBody"></div>
 </main>
 
@@ -155,6 +157,20 @@
       <button class="btn ghost" type="button" id="keyRemove" hidden>Remove</button>
     </div>
     <p class="hint">Kept in a settings file on this computer. An <code>ANTHROPIC_API_KEY</code> environment variable takes priority if one is set.</p>
+
+    <h3>Local model <span class="opt">optional</span></h3>
+    <p class="hint">A model running on your own hardware, offered next to Claude's on the main page: Ollama, LM Studio, llama.cpp, or anything else that speaks the OpenAI chat API. It needs no API key and costs nothing per file. How good the subtitles are depends on the model, and it is slower.</p>
+    <div class="form-grid">
+      <label for="localUrl">Server address</label>
+      <div class="inline"><input id="localUrl" placeholder="http://localhost:11434" spellcheck="false"><button class="btn" type="button" id="localCheck">Look for models</button></div>
+      <label for="localModel">Model</label>
+      <div class="inline"><input id="localModel" list="localModels" placeholder="e.g. gemma3:12b" autocomplete="off" spellcheck="false"><datalist id="localModels"></datalist></div>
+      <label for="localCtx">Context size</label>
+      <div class="inline"><input type="number" id="localCtx" min="2048" step="1024"><span class="hint">tokens the model is loaded with. Requests are sized to fit; a larger context means fewer, larger requests</span></div>
+      <label for="localKey">API key</label>
+      <div class="inline"><input type="password" id="localKey" autocomplete="off" spellcheck="false"><span class="hint">only if the server asks for one</span></div>
+    </div>
+    <p class="hint" id="localStatus"></p>
 
     <h3>Spending</h3>
     <div class="form-grid">
@@ -183,7 +199,7 @@
     <label class="check"><input type="checkbox" id="bilingual"> Keep the original line under each translation</label>
 
     <h3>Proofreading</h3>
-    <p class="hint">A second pass that reads the whole translation at once and corrects only the lines that need it: mistranslated idioms, grammar slips, a name or term translated two ways. The <b>Proofread</b> button on a file's review screen runs it once and shows the cost first.</p>
+    <p class="hint">A second pass that reads the whole translation at once and corrects only the lines that need it: mistranslated idioms, grammar slips, a name or term translated two ways. It runs after every translation unless you switch it off here; the estimates in the queue include it. The <b>Proofread</b> button on a file's review screen runs it again, with any model.</p>
     <label class="check"><input type="checkbox" id="proofAuto"> Proofread every file after it is translated</label>
     <div class="form-grid">
       <label for="proofModel">Read by</label>
@@ -266,6 +282,7 @@
       <input type="password" id="suKey" placeholder="sk-ant-…" autocomplete="off" spellcheck="false" aria-label="Claude API key">
       <button class="btn" type="button" id="suKeySave">Save key</button>
     </div>
+    <p class="hint">No key? A model running on your own machine works too: add it under Settings, Local model.</p>
 
     <h3><span class="step">2</span>Language to translate into</h3>
     <input id="suLang" list="langs" placeholder="Choose a language…" autocomplete="off" spellcheck="false" aria-label="Language to translate into">

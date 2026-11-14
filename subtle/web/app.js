@@ -3,7 +3,7 @@
 const S = {
   cfg: {}, models: [], labels: {}, errors: [], keySource: 'none', keyHint: '', mock: false, home: '', version: '',
   jobs: new Map(), ticker: {}, open: null, detail: null, rowEls: new Map(), filter: 'all', query: '',
-  ffmpeg: false, listen: {}, activity: [], bazarrKeySet: false, autoSpent: 0,
+  ffmpeg: false, listen: {}, activity: [], bazarrKeySet: false, localKeySet: false, autoSpent: 0,
   arr: {}, arrResult: {},  // Sonarr/Radarr: what is saved, and what the last Connect reported
 };
 const SHORT = {
@@ -59,7 +59,10 @@ function clock(ms, full) {
   const base = [h, m, s].map(x => String(x).padStart(2, '0')).join(':');
   return full ? base + ',' + String(ms % 1000).padStart(3, '0') : base;
 }
-const modelLabel = id => (S.models.find(m => m.id === id) || {}).label || id || '';
+const isLocal = id => (id || '').startsWith('local:');
+const modelLabel = id => (S.models.find(m => m.id === id) || {}).label || (id || '').replace(/^local:/, '');
+// A local model costs nothing per file, and "$0" would read as "not worked out".
+const about = v => v ? 'about ' + money(v) : 'no cost';
 
 // ── state ──────────────────────────────────────────────────────────────────
 function applyState(st) {
@@ -67,11 +70,11 @@ function applyState(st) {
     cfg: st.config, models: st.models, labels: st.labels, errors: st.errors, keySource: st.key_source,
     keyHint: st.key_hint, mock: st.mock, home: st.home, version: st.version,
     ffmpeg: st.ffmpeg, listen: st.listen, activity: st.activity, bazarrKeySet: st.bazarr_key_set,
-    autoSpent: st.auto_spent_today, arr: st.arr || {},
+    localKeySet: st.local_key_set, autoSpent: st.auto_spent_today, arr: st.arr || {},
   });
   S.jobs = new Map(st.jobs.map(j => [j.id, j]));
   $('#mockTag').hidden = !S.mock;
-  $('#keyBanner').hidden = S.keySource !== 'none';
+  $('#keyBanner').hidden = S.keySource !== 'none' || isLocal(S.cfg.model);
   renderControls(st.languages);
   renderQueue();
 }
@@ -85,11 +88,13 @@ function renderControls(languages) {
   const lang = $('#lang');
   if (document.activeElement !== lang) lang.value = S.cfg.target_name || '';
   lang.classList.toggle('need', !S.cfg.target_code);
+  $('.setup').classList.toggle('four', S.models.length > 3);
   $('#models').replaceChildren(...S.models.map(m => el('button', {
-    type: 'button', role: 'radio', 'aria-checked': String(m.id === S.cfg.model),
-    title: `${m.blurb} $${m.inp.toFixed(2)} per million tokens in, $${m.out.toFixed(2)} out.`,
+    type: 'button', role: 'radio', 'aria-checked': String(m.id === S.cfg.model), class: m.local ? 'local' : '',
+    title: m.local ? `${m.label}. ${m.blurb}` : `${m.blurb} $${m.inp.toFixed(2)} per million tokens in, $${m.out.toFixed(2)} out.`,
     onclick: () => saveCfg({ model: m.id }),
-  }, m.label, el('small', { text: `$${m.inp.toFixed(2)} / $${m.out.toFixed(2)}` }))));
+  }, el('span', { class: 'seg-name', text: m.label }),
+    el('small', { text: m.local ? 'local · free' : `$${m.inp.toFixed(2)} / $${m.out.toFixed(2)}` }))));
   for (const id of ['register', 'sdh', 'lyrics']) $('#' + id).value = S.cfg[id];
   if (document.activeElement !== $('#notes')) $('#notes').value = S.cfg.notes || '';
   const n = (S.cfg.glossary || []).length;
@@ -120,8 +125,9 @@ function renderSummary() {
   $('#queueSummary').textContent = bits.join(' · ');
   const go = $('#goBtn');
   go.disabled = !todo.length || !S.cfg.target_code;
-  go.textContent = todo.length ? `Translate ${plural(todo.length, 'file')} · about ${money(est)}` : 'Translate';
-  go.title = S.cfg.target_code ? '' : 'Choose a language to translate into first';
+  go.textContent = todo.length ? `Translate ${plural(todo.length, 'file')} · ${about(est)}` : 'Translate';
+  go.title = !S.cfg.target_code ? 'Choose a language to translate into first'
+    : S.cfg.proofread ? 'The estimate includes proofreading each file afterwards (Settings)' : '';
   $('#zipBtn').hidden = done < 2;
   $('#clearBtn').hidden = !done;
   const spent = jobs.reduce((a, j) => ({ cost: a.cost + j.spent.cost, tok: a.tok + j.spent.inp + j.spent.out }), { cost: 0, tok: 0 });
@@ -141,7 +147,7 @@ function jobRow(j) {
     if (j.used.target_name) bits.push(`${j.used.target_name}, ${modelLabel(j.used.model)}`);
     sub.append(bits.join(' · '));
     if (j.status === 'done' && j.flagged) sub.append(' · ', el('span', { class: 'amber', text: `${j.flagged} to check` }));
-    if (j.status === 'done' && j.proofed.model) sub.append(` · proofread, ${j.changed} changed`);
+    if (j.status === 'done' && j.proofed.model) sub.append(j.changed ? ` · proofread, ${j.changed} changed` : ' · proofread, no changes');
     if (j.saved_to) sub.append(' · saved next to the source');
   }
 
@@ -156,7 +162,10 @@ function jobRow(j) {
   const cost = j.spent.requests
     ? el('div', { class: 'job-cost', title: `${j.spent.inp.toLocaleString()} tokens in, ${j.spent.out.toLocaleString()} out, ${plural(j.spent.requests, 'request')}` },
         money(j.spent.cost), el('small', { text: `${tokens(j.spent.inp + j.spent.out)} tokens` }))
-    : el('div', { class: 'job-cost est', title: 'Estimate' }, startable(j) ? `≈ ${money((j.est || {}).cost || 0)}` : '');
+    : el('div', {
+        class: 'job-cost est',
+        title: (j.est || {}).proof ? `Estimate: ${money(j.est.cost - j.est.proof)} to translate, ${money(j.est.proof)} to proofread` : 'Estimate',
+      }, !startable(j) ? '' : (j.est || {}).cost ? `≈ ${money(j.est.cost)}` : 'no cost');
 
   const act = (label, fn, cls) => el('button', { class: 'btn small ' + (cls || ''), text: label, onclick: e => { e.stopPropagation(); fn(); } });
   const actions = el('div', { class: 'job-actions' });
@@ -178,6 +187,8 @@ function jobRow(j) {
 }
 
 function upsertJob(j) {
+  const before = S.jobs.get(j.id);
+  if (!before || before.status !== j.status || !before.ref !== !j.ref) libraryFollows(j);
   S.jobs.set(j.id, j);
   if (!active(j)) delete S.ticker[j.id];
   const old = $(`.job[data-id="${j.id}"]`);
@@ -254,7 +265,7 @@ function renderReviewHead() {
   if (d.proofed.model && !proofing) {
     const p = d.proofed;
     chips.push(el('span', {
-      class: 'chip', text: `Proofread by ${modelLabel(p.model)} · ${d.changed} changed`,
+      class: 'chip', text: `Proofread by ${modelLabel(p.model)} · ${d.changed ? d.changed + ' changed' : 'no changes'}`,
       title: `${plural(p.lines, 'line')} read for ${money(p.cost)}.` + (p.dropped ? ` ${plural(p.dropped, 'correction')} discarded for breaking a check.` : ''),
     }));
   }
@@ -331,7 +342,7 @@ function proofMenu(anchor) {
       return el('button', { type: 'button', role: 'menuitem', class: fit.kind, onclick: () => pick(m.id) },
         el('div', { class: 'menu-row' },
           el('span', {}, m.label, fit.kind === 'best' && el('b', { text: ' · recommended' })),
-          el('small', { text: `about ${money(est[m.id] || 0)}` })),
+          el('small', { text: about(est[m.id] || 0) })),
         fit.note && el('div', { class: 'menu-note', text: fit.note }));
     }));
   anchor.after(menu);
@@ -467,40 +478,97 @@ function toggleRedo(r) {
 }
 
 // ── library ────────────────────────────────────────────────────────────────
-// What Sonarr and Radarr have, and what each video has by way of subtitles. `open` holds the
-// episodes of the shows that are unfolded (null while they load).
-const L = { data: null, tab: 'shows', query: '', open: new Map(), loading: false };
-const VIDEO_STATE = {
-  have: ['', 'plain'], ours: ['translated by Subtle', 'green'], missing: ['missing', ''],
-  nosource: ['nothing to translate from', 'plain'], gone: ['file not found', 'red'],
+// What Sonarr and Radarr have, and what each video has by way of subtitles. `eps` holds the
+// episodes of every show looked at so far: they are fetched a few shows at a time once the list
+// is in, so each row can say how far along it is without being unfolded.
+const L = {
+  data: null, tab: 'shows', query: '', only: 'all', open: new Set(), eps: new Map(), nodes: new Map(),
+  loading: false, run: 0, at: 0, stale: false,
 };
+const VIDEO_STATE = {
+  have: ['✓ {lang} subtitles', 'green'], ours: ['✓ Translated by Subtle', 'green solid'], missing: ['Missing', ''],
+  queued: ['In the queue', 'plain'], nosource: ['Nothing to translate from', 'plain'], gone: ['File not found', 'red'],
+};
+const libraryShown = () => !$('#library').hidden;
 
 function stateBadge(v) {
   const [label, cls] = VIDEO_STATE[v.state] || [v.state, 'plain'];
-  let title = v.note || '';
-  if (v.made) {
-    const m = v.made;
-    title = modelLabel(m.model) + (m.reader ? `, proofread by ${modelLabel(m.reader)}` : '') +
-      ` · ${money(m.cost)} · ${plural(m.lines, 'line')}` + (m.flagged ? `, ${m.flagged} to check` : '');
-  }
-  return el('span', { class: 'badge ' + cls, text: v.state === 'have' ? `${L.data.target} subtitles` : label, title });
+  return el('span', { class: 'badge ' + cls, text: label.replace('{lang}', L.data.target), title: v.note || '' });
 }
 
-const loadShow = guard(async id => {
-  if (!L.open.has(id)) L.open.set(id, null);
-  renderLibrary();
-  try {
-    L.open.set(id, (await api('/api/library/show/' + id)).episodes);
-  } catch (e) { L.open.delete(id); throw e; } finally { renderLibrary(); }
-});
+// For a subtitle file Subtle wrote: who translated and read it, what it cost and when.
+function madeNote(v) {
+  if (!v.made) return null;
+  const m = v.made, when = new Date(m.at * 1000);
+  const bits = [modelLabel(m.model) + (m.reader ? `, proofread by ${modelLabel(m.reader)}` : ''), money(m.cost),
+    when.toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' })];
+  if (m.flagged) bits.push(`${m.flagged} to check`);
+  return el('span', { class: 'made', text: bits.join(' · '), title: `${plural(m.lines, 'line')}, written ${when.toLocaleString()}` });
+}
+
+function tally(videos) {
+  const t = { total: videos.length, have: 0, ours: 0, missing: 0, queued: 0, nosource: 0, gone: 0 };
+  for (const v of videos) t[v.state] = (t[v.state] || 0) + 1;
+  t.done = t.have + t.ours;
+  return t;
+}
+
+// Does this row belong in the list under the chosen filter? A show that has not been looked at
+// yet stays in "All" only.
+function wanted(t) {
+  if (L.only === 'all') return true;
+  if (!t) return false;
+  return L.only === 'missing' ? t.missing + t.queued > 0 : t.ours > 0;
+}
+
+function progressCell(t) {
+  if (!t) return el('span', { class: 'lib-prog wait', text: 'Looking…' });
+  const lang = L.data.target, left = t.missing + t.queued, stuck = t.nosource + t.gone;
+  const parts = [];
+  if (t.have) parts.push(`${t.have} came with ${lang} subtitles`);
+  if (t.ours) parts.push(`${t.ours} translated by Subtle`);
+  if (t.queued) parts.push(`${t.queued} in the queue`);
+  if (t.missing) parts.push(`${t.missing} missing`);
+  if (stuck) parts.push(`${stuck} that cannot be translated`);
+  const word = t.done === t.total ? el('span', { class: 'badge green', text: '✓ All done' })
+    : left ? el('span', { class: 'badge', text: `${left} missing` })
+    : el('span', { class: 'badge plain', text: `${stuck} cannot be translated` });
+  return el('span', { class: 'lib-prog', title: parts.join(' · ') },
+    el('span', { class: 'bar' }, el('i', { style: `width:${t.total ? Math.round(100 * t.done / t.total) : 0}%` })),
+    el('b', { text: `${t.done} of ${t.total}` }), word, t.ours > 0 && el('span', { class: 'by', text: `${t.ours} by Subtle` }));
+}
+
+// One show: fetch its episodes and redraw its rows. Used for the background pass over every
+// show, for unfolding one, and when a translation of one of its episodes finishes.
+async function fetchShow(id) {
+  const run = L.run;
+  let eps;
+  try { eps = (await api('/api/library/show/' + id)).episodes; } catch (e) { eps = e; }
+  if (run !== L.run) return;  // the list was reloaded meanwhile
+  L.eps.set(id, eps);
+  refreshShow(id);
+}
+
+async function fetchShows() {
+  const run = L.run;
+  const todo = L.data.sonarr.items.map(s => s.id).filter(id => !L.eps.has(id));
+  const worker = async () => {
+    while (todo.length && run === L.run) await fetchShow(todo.shift());
+  };
+  await Promise.all([worker(), worker(), worker()]);
+}
 
 const loadLibrary = guard(async () => {
   L.loading = true;
+  L.run++;
   renderLibrary();
   try {
     L.data = await api('/api/library');
-    for (const id of L.open.keys()) loadShow(id);  // what is unfolded may have changed too
+    L.eps = new Map();
+    L.at = Date.now();
+    L.stale = false;
   } finally { L.loading = false; renderLibrary(); }
+  if (L.data && L.data.target && L.data.sonarr.connected) fetchShows();
 });
 
 function openLibrary() {
@@ -508,8 +576,26 @@ function openLibrary() {
   $('#home').hidden = $('#review').hidden = true;
   $('#library').hidden = false;
   window.scrollTo(0, 0);
-  loadLibrary();
+  if (!L.data || L.stale || Date.now() - L.at > 5 * 60 * 1000) loadLibrary();
+  else renderLibrary();
 }
+
+// A job changed: if it came from the library, what the library shows about it is out of date.
+function libraryFollows(job) {
+  if (!job.ref || !L.data) return;
+  if (!libraryShown()) { L.stale = true; return; }
+  clearTimeout(libraryFollows.timer);
+  if (job.ref.kind === 'episode') libraryFollows.shows.add(job.ref.series);
+  else libraryFollows.movies = true;
+  libraryFollows.timer = setTimeout(() => {
+    const shows = [...libraryFollows.shows], movies = libraryFollows.movies;
+    libraryFollows.shows.clear();
+    libraryFollows.movies = false;
+    if (movies) return loadLibrary();
+    shows.forEach(fetchShow);
+  }, 600);
+}
+libraryFollows.shows = new Set();
 
 const setAuto = guard(async patch => {
   const r = await api('/api/library/auto', patch);
@@ -540,22 +626,28 @@ function addButton(kind, missing, series) {
 }
 
 function showRows(show) {
-  const unfolded = L.open.has(show.id), eps = L.open.get(show.id);
+  const unfolded = L.open.has(show.id), eps = L.eps.get(show.id), failed = eps instanceof Error;
+  const t = Array.isArray(eps) ? tally(eps) : null;
+  const toggle = () => {
+    unfolded ? L.open.delete(show.id) : L.open.add(show.id);
+    if (!unfolded && !L.eps.has(show.id)) fetchShow(show.id);
+    refreshShow(show.id);
+  };
   const head = el('div', {
-    class: 'lib-row show', tabIndex: 0, role: 'button', 'aria-expanded': String(unfolded),
-    onclick: () => { unfolded ? L.open.delete(show.id) : loadShow(show.id); if (unfolded) renderLibrary(); },
-    onkeydown: e => { if (e.key === 'Enter' && e.target === e.currentTarget) e.currentTarget.click(); },
+    class: 'lib-row show', tabIndex: 0, role: 'button', 'aria-expanded': String(unfolded), onclick: toggle,
+    onkeydown: e => { if (e.key === 'Enter' && e.target === e.currentTarget) toggle(); },
   }, el('span', { class: 'chev', text: '›' }),
     el('div', { class: 'lib-title' }, show.title, show.year && el('small', { text: show.year })),
-    el('span', { class: 'lib-count', text: plural(show.files, 'episode') }),
+    failed ? el('span', { class: 'lib-prog wait', text: 'Could not look', title: eps.message }) : progressCell(t),
     autoSwitch('New episodes', show.auto || L.data.auto_all, on => setAuto({ series: show.id, on }), L.data.auto_all,
       L.data.auto_all ? 'On for every show (the switch above the list)' : 'Translate new episodes of this show as they arrive'));
   if (!unfolded) return [head];
-  if (!eps) return [head, el('div', { class: 'lib-eps' }, el('div', { class: 'lib-sum', text: 'Looking at the files…' }))];
-  const done = eps.filter(e => e.state === 'have' || e.state === 'ours').length;
+  if (failed) return [head, el('div', { class: 'lib-eps' }, el('div', { class: 'lib-sum', text: eps.message }))];
+  if (!t) return [head, el('div', { class: 'lib-eps' }, el('div', { class: 'lib-sum', text: 'Looking at the files…' }))];
   const missing = eps.filter(e => e.state === 'missing');
   const box = el('div', { class: 'lib-eps' }, el('div', { class: 'lib-sum' },
-    `${done} of ${eps.length} have ${L.data.target} subtitles` + (missing.length ? ` · ${missing.length} missing` : ''),
+    `${t.done} of ${t.total} have ${L.data.target} subtitles` + (t.ours ? ` · ${t.ours} translated by Subtle` : '')
+      + (t.missing + t.queued ? ` · ${t.missing + t.queued} missing` + (t.queued ? ` (${t.queued} in the queue)` : '') : ''),
     missing.length > 0 && addButton('sonarr', missing, show.id)));
   let season = null;
   for (const e of eps) {
@@ -565,20 +657,72 @@ function showRows(show) {
     }
     box.append(el('div', { class: 'lib-ep' },
       el('span', { class: 'num', text: 'E' + String(e.number).padStart(2, '0') }),
-      el('span', { class: 'what' }, e.title, ['nosource', 'gone'].includes(e.state) && el('span', { class: 'why', text: e.note })),
-      stateBadge(e)));
+      el('span', { class: 'what' }, e.title, ['nosource', 'gone', 'queued'].includes(e.state) && el('span', { class: 'why', text: e.note })),
+      madeNote(e) || el('span'), stateBadge(e)));
   }
   return [head, box];
 }
 
-function renderLibrary() {
-  const d = L.data, note = $('#libNote'), body = $('#libBody'), tools = $('#libTools');
-  $('#libSummary').textContent = L.loading ? 'Asking Sonarr and Radarr…' : '';
-  if (!d) {
-    note.hidden = true;
-    return [$('#libTabs'), tools, body].forEach(n => n.replaceChildren());
+// Redraw one show where it stands, leaving the rest of the list (and whatever has focus) alone.
+function refreshShow(id) {
+  const show = L.data && L.data.sonarr.items.find(s => s.id === id), old = L.nodes.get(id);
+  if (L.tab !== 'shows') return;
+  if (L.only !== 'all' || !show || !old || !old[0].isConnected) return renderLibrary();
+  const fresh = showRows(show), focused = old[0] === document.activeElement;
+  old[0].replaceWith(...fresh);
+  old.slice(1).forEach(n => n.remove());
+  L.nodes.set(id, fresh);
+  if (focused) fresh[0].focus();
+  librarySummary();
+  libraryFilters();
+}
+
+// What the row of a show or movie counts up to (null for a show not looked at yet).
+const tallyOf = i => L.tab !== 'shows' ? tally([i]) : Array.isArray(L.eps.get(i.id)) ? tally(L.eps.get(i.id)) : null;
+
+function libraryItems() {
+  const part = L.tab === 'shows' ? L.data.sonarr : L.data.radarr;
+  const named = part.items.filter(i => !L.query || i.title.toLowerCase().includes(L.query));
+  return { part, named, usable: part.connected && !part.error && !!L.data.target };
+}
+
+function libraryFilters() {
+  const { named, usable } = libraryItems();
+  const count = key => named.filter(i => { const t = tallyOf(i); return t && (key === 'missing' ? t.missing + t.queued : t.ours) > 0; }).length;
+  $('#libOnly').replaceChildren(...(usable ? [['all', 'All'], ['missing', 'Missing'], ['ours', 'Translated by Subtle']] : [])
+    .map(([key, label]) => el('button', {
+      role: 'tab', 'aria-selected': String(L.only === key), onclick: () => { L.only = key; renderLibrary(); },
+    }, label, key !== 'all' && el('span', { text: count(key) }))));
+}
+
+function librarySummary() {
+  const d = L.data;
+  if (L.loading || !d) return void ($('#libSummary').textContent = L.loading ? 'Asking Sonarr and Radarr…' : '');
+  let text = '';
+  // "Missing" counts the ones waiting in the queue too, here and on every row: they have no subtitles yet.
+  const rest = t => (t.ours ? ` · ${t.ours} translated by Subtle` : '')
+    + (t.missing + t.queued ? ` · ${t.missing + t.queued} missing` + (t.queued ? ` (${t.queued} in the queue)` : '') : '');
+  if (L.tab === 'movies' && d.radarr.connected && d.target) {
+    const t = tally(d.radarr.items);
+    text = `${t.done} of ${plural(t.total, 'movie')} have ${d.target} subtitles` + rest(t);
+  } else if (L.tab === 'shows' && d.sonarr.connected && d.target) {
+    const seen = d.sonarr.items.map(s => L.eps.get(s.id)).filter(Array.isArray);
+    const t = tally(seen.flat()), left = d.sonarr.items.length - seen.length;
+    text = `${t.done} of ${plural(t.total, 'episode')} have ${d.target} subtitles` + rest(t)
+      + (left > 0 ? ` · still looking at ${plural(left, 'show')}…` : '');
   }
-  const shows = L.tab === 'shows', part = shows ? d.sonarr : d.radarr, app = shows ? 'Sonarr' : 'Radarr';
+  $('#libSummary').textContent = text;
+}
+
+function renderLibrary() {
+  const d = L.data, note = $('#libNote'), body = $('#libBody'), tools = $('#libTools'), head = $('#libHead');
+  librarySummary();
+  if (!d) {
+    note.hidden = head.hidden = true;
+    return [$('#libTabs'), $('#libOnly'), tools, body].forEach(n => n.replaceChildren());
+  }
+  const shows = L.tab === 'shows', app = shows ? 'Sonarr' : 'Radarr';
+  const { part, named, usable } = libraryItems();
   $('#libTabs').replaceChildren(...[['shows', 'Shows', d.sonarr], ['movies', 'Movies', d.radarr]].map(([key, label, p]) =>
     el('button', { role: 'tab', 'aria-selected': String(L.tab === key), onclick: () => { L.tab = key; renderLibrary(); } },
       label, el('span', { text: p.items.length }))));
@@ -590,7 +734,9 @@ function renderLibrary() {
   note.replaceChildren(message || '', ' ', d.target && !part.connected
     ? el('button', { class: 'btn small', text: `Connect ${app}…`, onclick: openSetup }) : '');
 
-  const items = part.items.filter(i => !L.query || i.title.toLowerCase().includes(L.query));
+  const items = named.filter(i => wanted(tallyOf(i)));
+  libraryFilters();
+
   tools.replaceChildren();
   if (part.connected && !part.error) {
     const missing = shows ? [] : items.filter(m => m.state === 'missing');
@@ -601,13 +747,21 @@ function renderLibrary() {
       : autoSwitch('Translate new movies', d.auto_movies, on => setAuto({ movies: on }), false,
           'Translate each movie as it arrives, unless it already has subtitles'));
   }
-  const rows = shows ? items.flatMap(showRows) : items.map(m => el('div', { class: 'lib-row' },
-    el('span'), el('div', { class: 'lib-title' }, m.title, m.year && el('small', { text: m.year }),
-      ['nosource', 'gone'].includes(m.state) && el('span', { class: 'why', text: m.note })),
-    el('span'), m.state ? stateBadge(m) : el('span')));
+  L.nodes = new Map();
+  const rows = shows ? items.flatMap(s => { const nodes = showRows(s); L.nodes.set(s.id, nodes); return nodes; })
+    : items.map(m => el('div', { class: 'lib-row' },
+      el('span'), el('div', { class: 'lib-title' }, m.title, m.year && el('small', { text: m.year }),
+        ['nosource', 'gone', 'queued'].includes(m.state) && el('span', { class: 'why', text: m.note })),
+      madeNote(m) || el('span'), m.state ? stateBadge(m) : el('span')));
   if (!rows.length && part.connected && !part.error) {
-    rows.push(el('div', { class: 'lib-empty', text: L.query ? 'Nothing matches.' : `${app} lists nothing with a file yet.` }));
+    rows.push(el('div', { class: 'lib-empty', text: L.query || L.only !== 'all' ? 'Nothing matches.' : `${app} lists nothing with a file yet.` }));
   }
+  head.hidden = !usable || !items.length;
+  head.className = 'lib-head ' + L.tab;
+  body.className = 'lib ' + L.tab;
+  head.replaceChildren(el('span'), el('span', { text: shows ? 'Show' : 'Movie' }),
+    el('span', { text: shows ? `Episodes with ${d.target} subtitles` : '' }),
+    el('span', { text: shows ? 'Auto-translate' : `${d.target} subtitles` }));
   body.hidden = !rows.length;
   body.replaceChildren(...rows);
 }
@@ -629,6 +783,7 @@ function onEvent(ev) {
     return;
   }
   if (ev.type === 'removed') {
+    if (S.jobs.has(ev.id)) libraryFollows(S.jobs.get(ev.id));
     S.jobs.delete(ev.id);
     if (S.open === ev.id) location.hash = '#/';
     return renderQueue();
@@ -697,9 +852,36 @@ function openSettings() {
   $('#proofModel').replaceChildren(el('option', { value: '', text: 'The model that translated the file' }),
     ...S.models.map(m => el('option', { value: m.id, text: m.label })));
   $('#proofModel').value = c.proof_model;
+  $('#localUrl').value = c.local_url || '';
+  $('#localModel').value = c.local_model || '';
+  $('#localCtx').value = c.local_ctx;
+  $('#localKey').value = '';
+  $('#localKey').placeholder = S.localKeySet ? 'saved — type to replace' : '';
+  $('#localStatus').textContent = c.local_url && c.local_model
+    ? `${c.local_model} is offered next to Claude's models on the main page.`
+    : 'Enter the address, look for models, and pick one.';
   $('#about').textContent = `Subtle ${S.version} · settings, cache and queue live in ${S.home}`;
   $('#settingsDlg').showModal();
 }
+
+// Ask the server at the address in the Local model fields what it is and which models it has.
+const checkLocal = guard(async () => {
+  const status = $('#localStatus'), btn = $('#localCheck');
+  btn.disabled = true;
+  status.textContent = 'Asking…';
+  try {
+    const r = await api('/api/local/test', { url: $('#localUrl').value.trim(), key: $('#localKey').value.trim() });
+    $('#localModels').replaceChildren(...r.models.map(name => el('option', { value: name })));
+    if (r.models.length && !r.models.includes($('#localModel').value.trim())) $('#localModel').value = r.models.length === 1 ? r.models[0] : '';
+    const what = r.kind === 'ollama' ? 'Ollama' : 'An OpenAI-style server';
+    status.textContent = r.models.length
+      ? `${what} answered with ${plural(r.models.length, 'model')}. ${$('#localModel').value ? '' : 'Pick one in the Model field.'}`
+      : `${what} answered, but it has no models yet. Download one there first.`;
+    if (!$('#localModel').value) $('#localModel').focus();
+  } catch (e) {
+    status.textContent = e.message;
+  } finally { btn.disabled = false; }
+});
 
 function openGlossary() {
   const rows = $('#glRows');
@@ -797,7 +979,8 @@ function openAutomation() {
     status(!!c.target_code, c.target_code
       ? `New downloads are translated into ${c.target_name} with ${modelLabel(c.model)}.`
       : 'Choose a language on the main page first; until then imports are skipped.'),
-    status(S.keySource !== 'none', S.keySource !== 'none' ? 'An API key is set.' : 'No API key yet (Settings).'),
+    isLocal(c.model) ? status(true, 'A local model translates: no API key is needed.')
+      : status(S.keySource !== 'none', S.keySource !== 'none' ? 'An API key is set.' : 'No API key yet (Settings).'),
     status(S.ffmpeg, S.ffmpeg ? 'ffmpeg found: subtitles inside video files can be read.'
       : 'ffmpeg not found: only videos with a subtitle file next to them can be translated.'),
     status(S.listen.open, S.listen.open ? `Listening on the network, port ${S.listen.port}.`
@@ -1024,7 +1207,11 @@ function bind() {
     concurrency: +$('#conc').value || 3, max_chars: +$('#maxChars').value || 42, max_cps: +$('#maxCps').value || 21,
     save_next_to_source: $('#saveNext').checked, bilingual: $('#bilingual').checked,
     proofread: $('#proofAuto').checked, proof_model: $('#proofModel').value,
+    local_url: $('#localUrl').value.trim(), local_model: $('#localModel').value.trim(),
+    local_ctx: +$('#localCtx').value || 4096, local_key: $('#localKey').value.trim(),
   }));
+  $('#localCheck').onclick = checkLocal;
+  $('#localUrl').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); checkLocal(); } });
 
   let depth = 0;
   const hasFiles = e => [...(e.dataTransfer?.types || [])].includes('Files');

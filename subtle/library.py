@@ -65,21 +65,21 @@ class Records:
 
 
 def status(video: Path, target: str, inside: list[str] | None = None, records: Records | None = None,
-           source: str = "en") -> dict:
+           source: str = "en", seen: dict | None = None) -> dict:
     """Where one video stands for the target language.
 
     state: have (real subtitles) | ours (Subtle wrote them) | missing (can be translated)
            | nosource (nothing to translate from) | gone (the file cannot be opened here)
     `inside` is what Sonarr or Radarr list as subtitle languages inside the file (None if they
     have not scanned it). That list cannot tell text from pictures, so "missing" means worth
-    trying, not certain to work.
+    trying, not certain to work. `seen` carries folder listings from one video to the next.
     """
     unknown = inside is None
     inside = [c.lower() for c in inside or []]
     if not video.is_file():
         return {"state": "gone", "note": f"Cannot open {video}. Check the path mapping."}
     want = variants(target)
-    for path, tags in media.sidecars(video):
+    for path, tags in media.sidecars(video, seen):
         if any(t in want for t in tags) and "forced" not in tags:
             made = records.get(path) if records else None
             if made:
@@ -88,7 +88,7 @@ def status(video: Path, target: str, inside: list[str] | None = None, records: R
     if any(c in want for c in inside):
         return {"state": "have", "note": "a track inside the file"}
     from_here = variants(source)
-    if unknown or media.find_sidecar(video, source) or any(c in from_here or c in _UNLABELLED for c in inside):
+    if unknown or media.find_sidecar(video, source, seen) or any(c in from_here or c in _UNLABELLED for c in inside):
         return {"state": "missing", "note": ""}
     if inside:
         name = resolve(source)[1] or source

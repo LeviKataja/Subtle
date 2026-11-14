@@ -14,10 +14,10 @@ from pathlib import Path
 
 from . import __version__, config, formats, media
 from .cache import Cache
-from .engine import BudgetExceeded, Options, Stats, Translator, estimate, proofread
+from .engine import BudgetExceeded, Options, Stats, Translator, estimate, estimate_proof, proofread
 from .languages import resolve, variants
 from .prompt import clean_title
-from .providers import ALIASES, MODELS, Cancelled, ProviderError, build
+from .providers import ALIASES, LOCAL, MODELS, Cancelled, ProviderError, build, local_settings
 
 _SCAN = (".srt", ".vtt", ".ass", ".ssa")
 
@@ -62,11 +62,18 @@ def collect(paths: list[str], code: str) -> list[Path]:
     return out
 
 
+def _model(name: str, cfg: dict) -> str:
+    """A model as typed on the command line -> its id: an alias, "local", or the id itself."""
+    if name == "local" and cfg.get("local_model"):
+        return LOCAL + cfg["local_model"]
+    return ALIASES.get(name, name)
+
+
 def _options(args, cfg: dict) -> Options:
     code, name = resolve(args.to) if getattr(args, "to", None) else (cfg["target_code"], cfg["target_name"])
     over = {"target_code": code, "target_name": name}
     if getattr(args, "model", None):
-        over["model"] = ALIASES.get(args.model, args.model)
+        over["model"] = _model(args.model, cfg)
     for key in ("sdh", "lyrics", "register", "notes", "budget"):
         if getattr(args, key, None) not in (None, ""):
             over[key] = getattr(args, key)
@@ -90,15 +97,18 @@ def cmd_translate(args) -> int:
     if not dry:
         mock = args.mock or bool(os.environ.get("SUBTLE_MOCK"))
         try:
-            provider = build(cfg["api_key"] if config.key_source(cfg) == "saved" else None, mock)
+            provider = build(cfg["api_key"] if config.key_source(cfg) == "saved" else None, mock,
+                             local_settings(cfg))
         except ProviderError as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
         cache = None if args.no_cache else Cache(config.home() / "cache.db")
 
-    label = MODELS.get(opts.model, {}).get("label", opts.model)
+    label = MODELS.get(opts.model, {}).get("label", opts.model.removeprefix(LOCAL))
     print(f"{len(files)} file(s) -> {opts.target_name or '?'} with {label}")
     total, est_total, failures, skipped, written = Stats(), 0.0, 0, 0, 0
+    proofing = bool(args.proofread or args.proofread_model or (cfg.get("proofread") and not args.no_proofread))
+    reader = _model(args.proofread_model, cfg) or cfg.get("proof_model") or ""
     for path in files:
         name, data = path.name, None
         if path.suffix.lower() in media.VIDEO_EXT:
@@ -112,11 +122,15 @@ def cmd_translate(args) -> int:
         doc = formats.parse(name, data if data is not None else path.read_bytes())
         opts.title = clean_title(name)
         est = estimate(doc, opts)
+        if proofing:
+            extra = estimate_proof(doc, opts, reader, planned=True)
+            est = {**est, **{k: est[k] + extra[k] for k in ("inp", "out", "cost")}}
         est_total += est["cost"]
         out_dir = Path(args.out) if getattr(args, "out", None) else path.parent
         out = out_dir / formats.output_name(name, opts.target_code)
         if dry:
-            print(f"  {path.name}: {est['units']} lines, ~{est['inp'] + est['out']:,} tokens, ~{money(est['cost'])}")
+            print(f"  {path.name}: {est['units']} lines, ~{est['inp'] + est['out']:,} tokens, ~{money(est['cost'])}"
+                  + (", proofreading included" if proofing else ""))
             continue
         if out.exists() and not args.force:
             print(f"  {path.name}: {out.name} already exists (use --force to redo)")
@@ -146,10 +160,9 @@ def cmd_translate(args) -> int:
                 return 1
             continue
         proofed = ""
-        if args.proofread or args.proofread_model or cfg.get("proofread"):
-            reader = ALIASES.get(args.proofread_model, args.proofread_model) or cfg.get("proof_model") or ""
+        if proofing:
             try:
-                extra, summary = proofread(doc, opts, provider, reader)
+                extra, summary = proofread(doc, opts, provider, reader, cache=cache)
                 total.add(extra)
                 stats.add(extra)
                 proofed = f", proofreading changed {len(summary['changed'])}"
@@ -204,7 +217,8 @@ def main(argv: list[str] | None = None) -> int:
         p = sub.add_parser(name, help=text)
         p.add_argument("paths", nargs="+", help="subtitle files, or folders to search")
         p.add_argument("--to", help="target language, e.g. fi or Finnish (default: the one saved in settings)")
-        p.add_argument("--model", help="haiku (default), sonnet, opus, or a full model id")
+        p.add_argument("--model", help="haiku (default), sonnet, opus, local (the local model in the settings), "
+                                       "or a full model id")
         p.add_argument("--sdh", choices=("keep", "strip"), help="strip removes [sounds] and SPEAKER: labels")
         p.add_argument("--lyrics", choices=("keep", "translate"))
         p.add_argument("--register", choices=("auto", "informal", "formal"))
@@ -217,14 +231,16 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--bilingual", action="store_true", help="keep the original line under each translation")
             p.add_argument("--budget", type=float, help="stop a file once it has cost this many dollars")
             p.add_argument("--proofread", action="store_true",
-                           help="read each finished translation once more and correct the lines that need it")
+                           help="read each finished translation once more and correct the lines that need it "
+                                "(the default, unless switched off in the settings)")
+            p.add_argument("--no-proofread", action="store_true", help="translate only: skip the proofreading pass")
             p.add_argument("--proofread-model", default="", metavar="MODEL",
                            help="proofread with this model instead of the one that translated (implies --proofread)")
             p.add_argument("--no-cache", action="store_true")
             p.add_argument("--mock", action="store_true", help="fake translations, for trying things out")
         else:
             p.set_defaults(dry_run=True, force=False, bilingual=False, mock=False, no_cache=True,
-                           proofread=False, proofread_model="")
+                           proofread=False, no_proofread=False, proofread_model="")
 
     cache = sub.add_parser("cache", help="manage cached translations")
     cache.add_argument("action", choices=("clear",))

@@ -389,6 +389,21 @@ class Proofread(unittest.TestCase):
         untouched = formats.parse("lighthouse.en.srt", SAMPLE)
         self.assertEqual(proofread(untouched, Options(**FI), MockProvider())[1]["lines"], 0)  # nothing translated yet
 
+    def test_a_reading_already_paid_for_is_not_paid_for_again(self):
+        cache = Cache(Path(tempfile.mkdtemp()) / "cache.db")
+        outcomes = []
+        for _ in range(2):  # the same file, translated and read twice over
+            doc, provider = formats.parse("lighthouse.en.srt", SAMPLE), MockProvider()
+            translate(doc, Options(**FI), provider, cache)
+            stats, summary = proofread(doc, Options(**FI), provider, cache=cache)
+            outcomes.append((provider.calls, stats.requests, stats.cost > 0, summary["changed"],
+                             [c.translation for c in doc.cues]))
+        first, second = outcomes
+        self.assertEqual(first[:3], (2, 1, True))    # one request to translate, one to read
+        self.assertEqual(second[:3], (0, 0, False))  # both from the cache
+        self.assertTrue(first[3])
+        self.assertEqual(first[3:], second[3:])      # and the same corrections land on the same lines
+
 
 class Server(unittest.TestCase):
     @classmethod
@@ -442,6 +457,7 @@ class Server(unittest.TestCase):
         code, state = self.call("/api/config", {"target": "finnish"})
         self.assertEqual((state["config"]["target_code"], state["config"]["target_name"]), ("fi", "Finnish"))
         self.assertNotIn("api_key", state["config"])
+        self.assertTrue(state["config"]["proofread"])  # a fresh install proofreads what it translates
 
         folder = Path(tempfile.mkdtemp())
         (folder / "Show.S01E01.en.srt").write_bytes(SAMPLE)
@@ -451,11 +467,15 @@ class Server(unittest.TestCase):
                          {"Show.S01E01.en.srt": "new", "Show.S01E01.sv.srt": "other"})
         _, added = self.call("/api/add-paths", {"paths": [str(folder / "Show.S01E01.en.srt")]})
         job_id = added["added"][0]["id"]
-        self.assertGreater(added["added"][0]["est"]["cost"], 0)
+        est = added["added"][0]["est"]
+        self.assertGreater(est["proof"], 0)  # the estimate covers the proofreading that will follow
+        self.assertGreater(est["cost"], est["proof"])
 
         self.assertEqual(self.call(f"/api/jobs/{job_id}/start", {})[1], {"started": 1})
         job = self.wait(job_id)
-        self.assertEqual((job["status"], job["flagged"], job["spent"]["requests"]), ("done", 0, 1))
+        # One request translated the file and one read it through, by the same model unless told otherwise.
+        self.assertEqual((job["status"], job["flagged"], job["spent"]["requests"]), ("done", 0, 2))
+        self.assertEqual(job["proofed"]["model"], "claude-haiku-5-5")
         saved = folder / "Show.S01E01.fi.srt"
         self.assertEqual(job["saved_to"], str(saved))
         self.assertEqual(saved.read_text("utf-8").count("-->"), 26)
@@ -469,7 +489,7 @@ class Server(unittest.TestCase):
         self.mgr.jobs[job_id].doc.cues[18].edited = False
         self.assertEqual(self.call(f"/api/jobs/{job_id}/fix", {})[1], {"again": 0, "shorter": 1})
         job = self.wait(job_id)
-        self.assertEqual((job["flagged"], job["spent"]["requests"]), (0, 2))
+        self.assertEqual((job["flagged"], job["spent"]["requests"]), (0, 3))
 
         code, text = self.call(f"/api/jobs/{job_id}/download?bilingual=1")
         self.assertIn(pseudo("How long overdue?") + "\nHow long overdue?", text)
@@ -477,7 +497,7 @@ class Server(unittest.TestCase):
         self.assertEqual(self.call(f"/api/jobs/{job_id}")[0], 404)
 
     def test_proofread_marks_changes_and_undo_puts_them_back(self):
-        self.call("/api/config", {"target": "finnish"})
+        self.call("/api/config", {"target": "finnish", "proofread": False})  # this one asks for the pass by hand
         _, job = self.call("/api/upload?name=Proof.S01E01.en.srt", raw=SAMPLE)
         job_id = job["id"]
         self.assertEqual(self.call(f"/api/jobs/{job_id}/proofread", {})[0], 400)  # not translated yet

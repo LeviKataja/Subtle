@@ -300,7 +300,8 @@ class Automation(unittest.TestCase):
         self.assertEqual((code, body), (200, {"ok": True, "action": "queued"}))
         entry = self.outcome("Show.S01E01.mkv")
         self.assertEqual((entry["status"], entry["origin"]), ("translated", "Sonarr"))
-        self.assertEqual(entry["note"], "Saved Show.S01E01.fi.srt.")
+        # Proofreading is on unless switched off, and the log says what it did.
+        self.assertRegex(entry["note"], r"^Saved Show\.S01E01\.fi\.srt, proofreading changed \d+\.$")
         self.assertGreater(entry["cost"], 0)
         out = video.with_name("Show.S01E01.fi.srt")
         self.assertEqual(out.read_text("utf-8").count("-->"), 26)
@@ -758,6 +759,12 @@ class Library(unittest.TestCase):
         self.assertEqual(sorted(j.via for j in jobs), ["Library · from Show.S01E05.en.srt",
                                                         "Library · track inside Show.S01E02.mkv (eng SubRip)"])
         self.assertTrue(all(j.status == "ready" and j.spent["cost"] == 0 for j in jobs))  # nothing spent by queueing
+        # While they wait, the Library says so instead of still calling them missing, and each
+        # job names its episode so the page knows which show to look at again when it changes.
+        waiting = {e["number"]: e for e in self.call("/api/library/show/7")[1]["episodes"]}
+        self.assertEqual((waiting[2]["state"], waiting[5]["state"], waiting[1]["state"]), ("queued", "queued", "have"))
+        self.assertIn("waiting for you to press Translate", waiting[2]["note"])
+        self.assertEqual(sorted(j.summary()["ref"]["id"] for j in jobs), [72, 75])
 
         # asked for again while they wait: not added twice
         events = self.mgr.subscribe()
@@ -776,6 +783,7 @@ class Library(unittest.TestCase):
         states = {e["number"]: e for e in self.call("/api/library/show/7")[1]["episodes"]}
         self.assertEqual((states[2]["state"], states[5]["state"], states[1]["state"]), ("ours", "ours", "have"))
         self.assertEqual((states[2]["made"]["model"], states[2]["made"]["lines"]), ("claude-haiku-5-5", 26))
+        self.assertEqual(states[2]["made"]["reader"], "claude-haiku-5-5")  # proofread too, as everything is by default
         self.assertGreater(states[2]["made"]["cost"], 0)
 
         out.write_bytes(SAMPLE)  # something else puts its own file there

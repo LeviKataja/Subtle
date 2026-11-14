@@ -21,12 +21,18 @@ DEFAULTS = {
     "notes": "",
     "glossary": [],  # [[source term, translation], ...]
     "budget": 0.0,  # USD cap per file; 0 = automatic (4x the estimate)
-    "proofread": False,  # read every finished translation once more and correct what needs it
+    "proofread": True,  # read every finished translation once more and correct what needs it
     "proof_model": "",  # the model that does the reading; "" = the one that translated the file
     "concurrency": 3,
     "save_next_to_source": True,
     "bilingual": False,
     "api_key": "",
+    # A model on your own hardware (Ollama, LM Studio, llama.cpp, ...), offered next to Claude's.
+    "local_url": "",  # e.g. http://localhost:11434
+    "local_model": "",  # its name on that server, e.g. gemma3:12b
+    "local_key": "",  # only for servers that ask for one
+    "local_ctx": 4096,  # tokens the model takes in one request; requests are sized to fit
+    "settings_version": 0,  # which one-off changes (see `load`) this file has been through
     # automation
     "webhook_secret": "",  # generated on first run; part of the Sonarr/Radarr webhook URL
     "path_maps": [],  # [[path as Sonarr/Radarr report it, same folder on this machine], ...]
@@ -53,12 +59,21 @@ def home() -> Path:
     return path
 
 
+VERSION = 1
+
+
 def load() -> dict:
     cfg = dict(DEFAULTS)
     try:
         cfg.update({k: v for k, v in json.loads((home() / "config.json").read_text("utf-8")).items() if k in DEFAULTS})
     except (OSError, ValueError):
         pass
+    if cfg["settings_version"] < 1:
+        # Proofreading became the default. A settings file from before that says "off" only
+        # because every key is written out, not because anyone chose it, so it is switched on
+        # once. Turning it off afterwards sticks.
+        cfg["proofread"] = True
+    cfg["settings_version"] = VERSION
     return cfg
 
 

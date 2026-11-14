@@ -33,7 +33,8 @@ from .languages import LANGUAGES, resolve, variants
 from .library import Records, status as video_status
 from .model import Document
 from .prompt import clean_title
-from .providers import MODELS, Cancelled, ProviderError, build
+from .providers import (DEFAULT_MODEL, LOCAL, MODELS, Cancelled, LocalProvider, ProviderError, build, is_local,
+                        local_settings)
 
 WEB = Path(__file__).parent / "web"
 STATIC = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"),
@@ -74,7 +75,7 @@ class Job:
                 "flagged": sum(1 for c in cues if c.flags),
                 "errors": sum(1 for c in cues if set(c.flags) & qa.ERRORS),
                 "edited": sum(1 for c in cues if c.edited), "created": self.created, "busy": self.busy,
-                "via": self.via, "doing": self.doing, "proofed": self.proofed,
+                "via": self.via, "doing": self.doing, "proofed": self.proofed, "ref": self.ref,
                 "changed": sum(1 for c in cues if c.prev is not None)}
 
     def row(self, i: int) -> dict:
@@ -170,10 +171,29 @@ class Manager:
     def provider(self):
         source = config.key_source(self.cfg)
         key = self.cfg.get("api_key") if source == "saved" else None
-        ident = (self.mock, source, key)
+        local = local_settings(self.cfg)
+        ident = (self.mock, source, key) + ((tuple(sorted(local.items())),) if local else ())
         if self._provider is None or self._provider_for != ident:
-            self._provider, self._provider_for = build(key, self.mock), ident
+            self._provider, self._provider_for = build(key, self.mock, local), ident
         return self._provider
+
+    def models(self) -> list[dict]:
+        """The models on offer: Claude's, and the local one once a server and a model are set."""
+        out = [{"id": k, **{f: v[f] for f in ("label", "inp", "out", "blurb")}} for k, v in MODELS.items()]
+        name = (self.cfg.get("local_model") or "").strip()
+        if name and (self.cfg.get("local_url") or "").strip():
+            out.append({"id": LOCAL + name, "label": name, "inp": 0.0, "out": 0.0, "local": True,
+                        "blurb": "Runs on your own hardware: no API key and nothing to pay per file."})
+        return out
+
+    def _estimate(self, job: Job) -> dict:
+        """What translating this file should cost, proofreading included when that is switched on."""
+        opts = self.options(job)
+        est = estimate(job.doc, opts)
+        if self.cfg.get("proofread"):
+            est["proof"] = estimate_proof(job.doc, opts, self.cfg.get("proof_model") or "", planned=True)["cost"]
+            est["cost"] += est["proof"]
+        return est
 
     def options(self, job: Job, use_run_settings: bool = False) -> Options:
         over = {"title": clean_title(job.name)}
@@ -190,17 +210,19 @@ class Manager:
     # --- state --------------------------------------------------------------
 
     def state(self) -> dict:
-        cfg = {k: v for k, v in self.cfg.items() if k not in ("api_key", "bazarr_key", "sonarr_key", "radarr_key")}
+        cfg = {k: v for k, v in self.cfg.items()
+               if k not in ("api_key", "bazarr_key", "sonarr_key", "radarr_key", "local_key")}
         key = self.cfg.get("api_key") or ""
         return {
             "version": __version__, "mock": self.mock, "home": str(config.home()),
             "arr": {k: {"url": self.cfg.get(f"{k}_url", ""), "key_set": bool(self.cfg.get(f"{k}_key"))}
                     for k in ("sonarr", "radarr")},
             "ffmpeg": media.available(), "listen": self.listen, "bazarr_key_set": bool(self.cfg.get("bazarr_key")),
+            "local_key_set": bool(self.cfg.get("local_key")),
             "activity": self.activity[-30:], "auto_spent_today": round(self.auto_spent_today(), 4),
             "config": cfg, "key_source": "mock" if self.mock else config.key_source(self.cfg),
             "key_hint": f"…{key[-4:]}" if len(key) > 8 else "",
-            "models": [{"id": k, **{f: v[f] for f in ("label", "inp", "out", "blurb")}} for k, v in MODELS.items()],
+            "models": self.models(),
             "languages": [{"code": c, "name": n} for c, n in LANGUAGES],
             "labels": qa.LABELS, "errors": sorted(qa.ERRORS),
             "jobs": [j.summary() for j in self.jobs.values()],
@@ -215,7 +237,8 @@ class Manager:
                           ("chunk_lines", int), ("budget", float), ("concurrency", int),
                           ("save_next_to_source", bool), ("bilingual", bool), ("api_key", str),
                           ("bazarr_url", str), ("bazarr_wait", int), ("auto_daily_budget", float),
-                          ("setup_seen", bool), ("reach_url", str), ("proofread", bool), ("proof_model", str)):
+                          ("setup_seen", bool), ("reach_url", str), ("proofread", bool), ("proof_model", str),
+                          ("local_url", str), ("local_model", str), ("local_ctx", int)):
             if key in patch:
                 cfg[key] = kind(patch[key]) if patch[key] is not None else config.DEFAULTS[key]
         if "glossary" in patch:
@@ -234,15 +257,34 @@ class Manager:
         cfg["max_cps"] = max(8, min(cfg["max_cps"], 40))
         cfg["chunk_lines"] = max(20, min(cfg["chunk_lines"], 400))
         cfg["api_key"] = cfg["api_key"].strip()
-        if cfg["proof_model"] not in MODELS:
-            cfg["proof_model"] = ""  # "" = whichever model translated the file
+        if patch.get("local_key"):  # an empty field means "keep the saved one"
+            cfg["local_key"] = str(patch["local_key"]).strip()
+        cfg["local_url"], cfg["local_model"] = cfg["local_url"].strip(), cfg["local_model"].strip()
+        if not cfg["local_url"]:
+            cfg["local_key"] = ""
+        cfg["local_ctx"] = max(2048, min(cfg["local_ctx"], 2_000_000))
+        known = {m["id"] for m in self.models()}
+        mine = next((i for i in known if is_local(i)), "")
+        if is_local(cfg["model"]) and cfg["model"] not in known:
+            cfg["model"] = mine or DEFAULT_MODEL  # the local model was renamed, or is gone
+        if is_local(cfg["escalate_model"]) and cfg["escalate_model"] not in known:
+            cfg["escalate_model"] = ""
+        if cfg["proof_model"] not in known:
+            cfg["proof_model"] = mine if is_local(cfg["proof_model"]) else ""  # "" = whichever model translated
         config.save(cfg)
         if "concurrency" in patch:
             self.pool = ThreadPoolExecutor(max_workers=self._workers())
         for job in self.jobs.values():
             if job.status in ("ready", "stopped", "error"):
-                job.est = estimate(job.doc, self.options(job))
+                job.est = self._estimate(job)
         return self.state()
+
+    def local_test(self, url: str, key: str = "") -> dict:
+        """Ask a local model server what it is and which models it has. Nothing is saved."""
+        url = (url or self.cfg.get("local_url") or "").strip()
+        if not url:
+            raise ValueError("Enter the address of the model server first, for example http://localhost:11434.")
+        return LocalProvider(url, key.strip() or self.cfg.get("local_key") or "").describe()
 
     # --- adding files -------------------------------------------------------
 
@@ -253,7 +295,7 @@ class Manager:
             raise ValueError(f"{name} has no subtitle lines in it.")
         job = Job(name, doc, src_path)
         job.via = via
-        job.est = estimate(doc, self.options(job))
+        job.est = self._estimate(job)
         with self.lock:
             self.jobs[job.id] = job
         self._save(job)
@@ -465,14 +507,28 @@ class Manager:
             return True
         return bool(ref) and ref.get("series") in (self.cfg.get("auto_series") or [])
 
-    def _state_of(self, path: str, inside) -> dict:
+    def _waiting(self) -> dict[str, str]:
+        """Files the unfinished jobs in the queue were made from (path -> job status)."""
+        return {j.src_path: j.status for j in list(self.jobs.values()) if j.src_path and j.status != "done"}
+
+    def _state_of(self, path: str, inside, seen: dict | None = None, waiting: dict | None = None) -> dict:
+        """One video's subtitle status, plus "queued" for a missing one that is already in the queue."""
         local = Path(map_path(path, self.cfg.get("path_maps")))
-        return video_status(local, self.cfg["target_code"], inside, self.records)
+        state = video_status(local, self.cfg["target_code"], inside, self.records, seen=seen)
+        if state["state"] == "missing" and waiting:
+            source = media.find_sidecar(local, seen=seen)
+            job = waiting.get(str(source)) if source else waiting.get(str(local))
+            if job:
+                working = job in ("queued", "running")
+                state = {"state": "queued", "note": "Being translated now." if working else
+                         "In the queue, waiting for you to press Translate."}
+        return state
 
     def library(self) -> dict:
         """Shows and movies as Sonarr and Radarr list them. Movies come with their subtitle status."""
         code = self.cfg["target_code"]
         chosen = set(self.cfg.get("auto_series") or [])
+        seen, waiting = {}, self._waiting()
         out = {"target": self.cfg["target_name"], "auto_all": bool(self.cfg.get("auto_all")),
                "auto_movies": bool(self.cfg.get("auto_movies"))}
         for kind in ("sonarr", "radarr"):
@@ -489,7 +545,8 @@ class Manager:
                 part["items"] = [{**i, "auto": i["id"] in chosen} for i in items if i["files"]]
             else:
                 part["items"] = [{"id": i["id"], "title": i["title"], "year": i["year"],
-                                  **(self._state_of(i["path"], i["inside"]) if code else {"state": "", "note": ""})}
+                                  **(self._state_of(i["path"], i["inside"], seen, waiting) if code
+                                     else {"state": "", "note": ""})}
                                  for i in items if i["path"]]
         return out
 
@@ -500,8 +557,9 @@ class Manager:
             raise ValueError("Sonarr is not connected.")
         if not self.cfg["target_code"]:
             raise ValueError("Choose a language to translate into first.")
+        seen, waiting = {}, self._waiting()
         episodes = [{"id": e["id"], "season": e["season"], "number": e["number"], "title": e["title"],
-                     **self._state_of(e["path"], e["inside"])} for e in arr.episodes(series)]
+                     **self._state_of(e["path"], e["inside"], seen, waiting)} for e in arr.episodes(series)]
         return {"id": series, "episodes": episodes}
 
     def set_auto(self, data: dict) -> dict:
@@ -560,6 +618,7 @@ class Manager:
                     job.ref = ({"kind": "episode", "series": int(series or 0), "id": item["id"]} if kind == "sonarr"
                                else {"kind": "movie", "id": item["id"]})
                     self._save(job)
+                    self._announce(job)  # with its ref, so the Library page knows which show to look at again
                     queued.add(beside)
                     added += 1
             except ArrError as e:
@@ -714,7 +773,7 @@ class Manager:
             if self.cfg.get("proofread"):
                 job.doing = "proofread"
                 self._announce(job)
-                job.error = self._proof(job, opts, self.cfg.get("proof_model") or "")
+                job.error = self._proof(job, opts, self.cfg.get("proof_model") or "", self.cache)
             job.last = asdict(tr.stats)
             self._autosave(job)  # before "done" is visible: whoever sees that may look for the file
             job.status = "done"
@@ -740,16 +799,18 @@ class Manager:
                 except ArrError:
                     pass
 
-    def _proof(self, job: Job, opts: Options, model: str = "") -> str:
+    def _proof(self, job: Job, opts: Options, model: str = "", cache=None) -> str:
         """One proofreading pass over a finished job. Returns "" or what went wrong.
 
-        A failure here never costs the translation: the file is done either way.
+        A failure here never costs the translation: the file is done either way. The pass that
+        follows a translation uses the cache, so translating a file again costs nothing twice
+        over; the Proofread button always gets a fresh reading.
         """
         def emit(event: dict) -> None:
             self.publish({"type": "cue", "job": job.id, "row": job.row(event["i"])})
 
         try:
-            stats, summary = proofread(job.doc, opts, self.provider(), model, emit, lambda: job.cancel)
+            stats, summary = proofread(job.doc, opts, self.provider(), model, emit, lambda: job.cancel, cache)
         except Cancelled:
             return "Proofreading was stopped. The translation itself is complete."
         except (ProviderError, BudgetExceeded) as e:
@@ -790,7 +851,7 @@ class Manager:
         for cue in job.doc.cues:
             cue.translation, cue.flags, cue.edited, cue.prev = None, [], False, None
         job.status, job.error, job.progress, job.saved_to, job.proofed = "ready", "", [0, 0], "", {}
-        job.est = estimate(job.doc, self.options(job))
+        job.est = self._estimate(job)
         self._save(job)
         self._announce(job)
 
@@ -882,7 +943,8 @@ class Manager:
         out = job.detail()
         if job.status == "done":
             opts = self.options(job, True)
-            out["proof_est"] = {m: round(estimate_proof(job.doc, opts, m)["cost"], 4) for m in MODELS}
+            out["proof_est"] = {m["id"]: round(estimate_proof(job.doc, opts, m["id"])["cost"], 4)
+                                for m in self.models()}
         return out
 
     def proofread(self, job: Job, model: str = "") -> None:
@@ -890,7 +952,7 @@ class Manager:
         self._idle(job)
         if job.status != "done":
             raise ValueError("Translate the file first.")
-        if model and model not in MODELS:
+        if model and model not in {m["id"] for m in self.models()}:
             raise ValueError("Unknown model.")
         job.busy, job.doing, job.cancel = True, "proofread", False
         self._announce(job)
@@ -1108,6 +1170,8 @@ class Handler(BaseHTTPRequestHandler):
             return mgr.scan(str(data.get("path", "")))
         if path == "/api/add-paths":
             return mgr.add_paths([str(p) for p in data.get("paths", [])])
+        if path == "/api/local/test":
+            return mgr.local_test(str(data.get("url") or ""), str(data.get("key") or ""))
         if path == "/api/bazarr/test":
             url, key = str(data.get("url") or mgr.cfg["bazarr_url"]), str(data.get("key") or mgr.cfg["bazarr_key"])
             if not url or not key:
