@@ -3,6 +3,7 @@
     subtle                       open the web UI
     subtle translate PATH... --to fi
     subtle estimate PATH...
+    subtle report                a text file of numbers on how it has been doing here (see report.py)
 """
 from __future__ import annotations
 
@@ -246,9 +247,20 @@ def main(argv: list[str] | None = None) -> int:
     cache.add_argument("action", choices=("clear",))
     cache.add_argument("--data", help="folder for settings and cache (default: ~/.subtle)")
 
+    rep = sub.add_parser("report", help="write a text file of numbers on how Subtle has been doing here, "
+                                        "with file names, keys and addresses left out")
+    rep.add_argument("--lines", type=int, default=0, metavar="N",
+                     help="also quote up to N subtitle lines for each kind of flag and for proofreading changes")
+    rep.add_argument("-o", "--out", help="where to write it (default: subtle-report.txt here; - prints it)")
+    rep.add_argument("--data", help="folder Subtle keeps its settings and queue in (default: ~/.subtle)")
+
     args = parser.parse_args(argv)
     if getattr(args, "data", None):
         os.environ["SUBTLE_HOME"] = args.data
+    if args.command == "report":
+        from . import report
+
+        return report.main(args)
     if args.command in ("translate", "estimate"):
         return cmd_translate(args)
     if args.command == "cache":

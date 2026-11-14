@@ -26,6 +26,7 @@ Finnish; everything else has only met the built-in fake model. What has and has 
 | Sonarr, Radarr, the Library page | Written against their source and tested against stand-ins. One user has since run them against a real Sonarr and Radarr and reports that it works; which parts that covered is not recorded. |
 | Bazarr | Written against its source and tested against a stand-in. Not tried with a real instance. |
 | Local models | Written against Ollama's documentation and the OpenAI chat format, and tested against a stand-in server. Never run against a real Ollama, LM Studio or llama.cpp, and nobody has looked at what a local model makes of a subtitle file. |
+| The report (`subtle report`) | Covered by tests on a made-up data folder filled with keys, addresses and show names, none of which reach the report. Never run on a real install. |
 | Dockerfile | Never built. |
 
 Start with one file and a low spending cap, and read the result before trusting it with a library.
@@ -71,6 +72,27 @@ Existing translations are skipped unless you pass `--force`. `--help` lists the 
 (`--model`, `--sdh strip`, `--register`, `--notes`, `--bilingual`, `--budget`, `--out`,
 `--no-proofread`, `--proofread-model sonnet`). `--model local` uses the local model from the
 settings.
+
+### Telling whoever works on Subtle how it went
+
+```bash
+python -m subtle report
+```
+
+This writes `subtle-report.txt` in the current folder, so that you can say how Subtle has been
+doing without sending your library. It holds, for each file Subtle saved, the model, the cost,
+the line count, the flags and what proofreading changed; for what is in the queue, the estimate
+against what was spent, the token counts and the flags by kind; and what the automation log
+says was skipped or failed, and why.
+
+- File and show names become `file 1`, `file 2`. Keys, addresses, folders, the note for the
+  translator and the glossary are left out, and no subtitle text is included.
+- `--lines 5` adds up to five quoted lines for each kind of flag and five proofreading changes,
+  original beside translation. That is subtitle text, so it is off unless you ask.
+- Error messages are passed on with names and addresses replaced. A name with spaces in it
+  that Subtle has no record of can survive in part, so read the file through before sending it.
+- Nothing is sent anywhere, and Subtle's own files are only read. `--data` points it at another
+  data folder, and `-o -` prints the report instead of writing it.
 
 ## Why it is cheap
 
@@ -215,6 +237,7 @@ subtle/
   library.py    what each video has, and the record of the subtitle files Subtle wrote
   providers.py  Claude, local model servers (and the offline mock used by tests and --mock)
   cache.py      sqlite cache of finished chunks
+  report.py     numbers on how it has been doing here, with every name left out
   server.py     local web server (standard library only)
   web/          the UI (no build step)
 tests/          python -m unittest discover -s tests   (offline: stand-ins for every outside service)
