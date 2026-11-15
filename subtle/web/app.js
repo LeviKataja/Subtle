@@ -4,6 +4,9 @@ const S = {
   cfg: {}, models: [], labels: {}, errors: [], keySource: 'none', keyHint: '', mock: false, home: '', version: '',
   jobs: new Map(), ticker: {}, open: null, detail: null, rowEls: new Map(), filter: 'all', query: '',
   sel: null, anchor: null,  // the line the preview shows; the line whose neighbours a filter lets through
+  pick: null,               // the file whose details the pane beside the queue shows
+  peek: new Map(),          // the flagged lines of finished files, fetched when one is picked
+  jump: null,               // the line to select once the file being opened is on screen
   preview: true, section: 'key',
   ffmpeg: false, listen: {}, activity: [], bazarrKeySet: false, localKeySet: false, autoSpent: 0,
   arr: {}, arrResult: {},  // Sonarr/Radarr: what is saved, and what the last Connect reported
@@ -113,12 +116,40 @@ function renderControls(languages) {
 const startable = j => ['ready', 'stopped', 'error'].includes(j.status);
 const active = j => ['queued', 'running'].includes(j.status);
 
+// How a file shows on the board: its colour, the big figure, the word under it.
+function face(j) {
+  const [done, total] = j.progress;
+  if (j.doing === 'proofread') return { key: 'run', tone: 't-run', big: '…', word: 'proofreading' };
+  if (j.status === 'running') return { key: 'run', tone: 't-run', big: (total ? Math.round(100 * done / total) : 0) + '%', word: 'translating' };
+  if (j.status === 'queued') return { key: 'run', tone: 't-run', big: '…', word: 'queued' };
+  if (j.status === 'done') {
+    return j.flagged ? { key: 'check', tone: 't-check', big: String(j.flagged), word: 'to check' }
+      : { key: 'done', tone: 't-done', big: 'OK', word: 'done' };
+  }
+  if (j.status === 'error') return { key: 'stop', tone: 't-bad', big: '!', word: 'failed' };
+  if (j.status === 'stopped') return { key: 'stop', tone: 't-bad', big: '■', word: 'stopped' };
+  return { key: 'wait', tone: 't-idle', big: '–', word: 'waiting' };
+}
+const TALLY = [['run', 't-run', 'translating'], ['check', 't-check', 'to check'], ['wait', 't-idle', 'waiting'],
+  ['done', 't-done', 'done'], ['stop', 't-bad', 'stopped']];
+
 function renderQueue() {
   const jobs = [...S.jobs.values()].sort((a, b) => a.created - b.created);
-  $('#queue').hidden = !jobs.length;
-  $('#drop').classList.toggle('compact', jobs.length > 0);
+  if (!S.jobs.has(S.pick)) {
+    const first = jobs.find(j => j.status === 'done' && j.flagged) || jobs.find(active) || jobs[0];
+    S.pick = first ? first.id : null;
+  }
+  $('#jobCols').hidden = !jobs.length;
+  $('#queueEmpty').hidden = jobs.length > 0;
   $('#jobs').replaceChildren(...jobs.map(jobRow));
   renderSummary();
+  renderJobPane();
+}
+
+function pickJob(id) {
+  S.pick = id;
+  for (const node of document.querySelectorAll('#jobs .job')) node.setAttribute('aria-pressed', String(node.dataset.id === id));
+  renderJobPane();
 }
 
 function renderSummary() {
@@ -127,10 +158,8 @@ function renderSummary() {
   const est = todo.reduce((sum, j) => sum + ((j.est || {}).cost || 0), 0);
   const done = jobs.filter(j => j.status === 'done').length;
   const running = jobs.filter(active).length;
-  const bits = [plural(jobs.length, 'file')];
-  if (running) bits.push(`${running} in progress`);
-  if (done) bits.push(`${done} done`);
-  $('#queueSummary').textContent = bits.join(' · ');
+  // How many are in each state is counted in the top bar; this is only how many there are.
+  $('#queueSummary').textContent = plural(jobs.length, 'file');
   const go = $('#goBtn');
   go.disabled = !todo.length || !S.cfg.target_code;
   go.textContent = todo.length ? `Translate ${plural(todo.length, 'file')} · ${about(est)}` : 'Translate';
@@ -140,7 +169,12 @@ function renderSummary() {
   $('#clearBtn').hidden = !done;
   const spent = jobs.reduce((a, j) => ({ cost: a.cost + j.spent.cost, tok: a.tok + j.spent.inp + j.spent.out }), { cost: 0, tok: 0 });
   $('#spend').replaceChildren(...(spent.tok ? ['Spent ', el('b', { text: money(spent.cost) }), ` · ${tokens(spent.tok)} tokens`] : []));
+  $('#queueFoot').hidden = !jobs.length;
   $('#navLive').hidden = !running;
+  const counts = {};
+  for (const j of jobs) counts[face(j).key] = (counts[face(j).key] || 0) + 1;
+  $('#tally').replaceChildren(...TALLY.filter(([key]) => counts[key]).map(([key, tone, word]) =>
+    el('li', {}, el('b', { class: tone, text: counts[key] }), word)));
   renderTab();
 }
 
@@ -194,66 +228,133 @@ function notifyHint() {
     : 'Sent only while this tab is in the background. The choice is kept in this browser.';
 }
 
+// A file name, with places to break it after each dot, dash and underscore: release names are
+// one long word, and a row has room for two short lines of it.
+const breakable = name => name.split(/(?<=[._-])/).flatMap((part, i) => i ? [el('wbr'), part] : [part]);
+
 function jobRow(j) {
   const [done, total] = j.progress;
   const pct = total ? Math.round(100 * done / total) : 0;
-  const sub = el('div', { class: 'job-sub' });
-  if (j.doing === 'proofread') sub.append(el('span', { class: 'live', text: 'Proofreading the whole translation…' }));
-  else if (j.status === 'running' && S.ticker[j.id]) sub.append(el('span', { class: 'live', text: S.ticker[j.id] }));
-  else if (j.error) sub.append(el('span', { class: 'bad', text: j.error }));
-  else {
-    const bits = [plural(j.cues, 'line')];
-    if (j.via) bits.push(j.via);
-    if (j.used.target_name) bits.push(`${j.used.target_name}, ${modelLabel(j.used.model)}`);
-    sub.append(bits.join(' · '));
-    if (j.status === 'done' && j.flagged) sub.append(' · ', el('span', { class: 'amber', text: `${j.flagged} to check` }));
-    if (j.status === 'done' && j.proofed.model) sub.append(j.changed ? ` · proofread, ${j.changed} changed` : ' · proofread, no changes');
-    if (j.saved_to) sub.append(' · saved next to the source');
-  }
+  const f = face(j);
+  const open = () => { location.hash = '#/job/' + j.id; };
+  // `label` is what a phone puts in front of the cell, where there is no row of headings.
+  const cell = (label, main, sub, cls) => el('span', { 'data-l': label }, main,
+    sub ? el('span', { class: 'sub' + (cls ? ' ' + cls : ''), text: sub }) : null);
 
-  let prog = '';
-  if (active(j)) {
-    prog = el('div', { class: 'job-prog' }, el('div', { class: 'bar' }, el('i', { style: `width:${pct}%` })),
-      j.status === 'queued' ? 'Waiting…' : `${pct}%  ·  ${done} of ${total}`);
-  } else if (j.status === 'done' && j.last.cached && j.last.cached === j.last.units) {
-    prog = el('div', { class: 'job-prog', text: 'From cache' });
+  let prog;
+  if (j.doing === 'proofread') {
+    prog = el('span', { 'data-l': 'Progress' }, el('span', { class: 'sub job-sub' }, el('span', { class: 'live', text: 'Proofreading the whole translation…' })));
+  } else if (active(j)) {
+    prog = el('span', { 'data-l': 'Progress' }, el('span', { class: 'bar' }, el('i', { style: `width:${pct}%` })),
+      el('span', { class: 'sub job-sub' }, j.status === 'queued' ? 'Waiting its turn'
+        : S.ticker[j.id] ? el('span', { class: 'live', text: S.ticker[j.id] }) : `${done} of ${total}`));
+  } else if (j.error) {
+    prog = cell('Progress', 'Stopped', j.error, 'bad');
+  } else if (j.status === 'done') {
+    prog = cell('Progress', j.proofed.model ? 'Proofread' : j.last.cached && j.last.cached === j.last.units ? 'From cache' : 'Translated',
+      [j.proofed.model && (j.changed ? `${plural(j.changed, 'line')} changed` : 'no changes'), j.saved_to && 'saved next to the source'].filter(Boolean).join(' · '));
+  } else {
+    prog = el('span', { 'data-l': 'Progress' });
   }
 
   const cost = j.spent.requests
-    ? el('div', { class: 'job-cost', title: `${j.spent.inp.toLocaleString()} tokens in, ${j.spent.out.toLocaleString()} out, ${plural(j.spent.requests, 'request')}` },
-        money(j.spent.cost), el('small', { text: `${tokens(j.spent.inp + j.spent.out)} tokens` }))
-    : el('div', {
-        class: 'job-cost est',
+    ? el('span', { 'data-l': 'Cost', title: `${j.spent.inp.toLocaleString()} tokens in, ${j.spent.out.toLocaleString()} out, ${plural(j.spent.requests, 'request')}` },
+        el('span', { class: 'mono', text: money(j.spent.cost) }), el('span', { class: 'sub', text: `${tokens(j.spent.inp + j.spent.out)} tokens` }))
+    : el('span', {
+        'data-l': 'Cost',
         title: (j.est || {}).proof ? `Estimate: ${money(j.est.cost - j.est.proof)} to translate, ${money(j.est.proof)} to proofread` : 'Estimate',
-      }, !startable(j) ? '' : (j.est || {}).cost ? `≈ ${money(j.est.cost)}` : 'no cost');
-
-  const act = (label, fn, cls) => el('button', { class: 'btn small ' + (cls || ''), text: label, onclick: e => { e.stopPropagation(); fn(); } });
-  const actions = el('div', { class: 'job-actions' });
-  if (startable(j)) actions.append(act(j.status === 'ready' ? 'Translate' : 'Resume', guard(() => api(`/api/jobs/${j.id}/start`, {}))));
-  if (active(j)) actions.append(act('Stop', guard(() => api(`/api/jobs/${j.id}/cancel`, {}))));
-  if (j.status === 'done') {
-    actions.append(act('Review', () => { location.hash = '#/job/' + j.id; }));
-    actions.append(act('Download', () => download(j), 'primary'));
-  }
-  if (!active(j)) actions.append(act('✕', guard(() => api(`/api/jobs/${j.id}`, undefined, 'DELETE')), 'ghost danger'));
+      }, startable(j) ? [el('span', { class: 'mono', text: (j.est || {}).cost ? `≈ ${money(j.est.cost)}` : 'no cost' }), el('span', { class: 'sub', text: 'estimate' })] : null);
 
   return el('div', {
-    class: 'job' + (j.flagged ? ' warn' : ''), 'data-status': j.status, 'data-id': j.id, tabIndex: 0,
-    onclick: () => { location.hash = '#/job/' + j.id; },
-    onkeydown: e => { if (e.key === 'Enter' && e.target === e.currentTarget) location.hash = '#/job/' + j.id; },
-  }, el('span', { class: 'dot' }),
-    el('div', {}, el('div', { class: 'job-name', text: j.name, title: j.src_path || j.name }), sub),
-    prog || el('div'), cost, actions);
+    class: 'brow job', 'data-status': j.status, 'data-id': j.id, tabIndex: 0, 'aria-pressed': String(S.pick === j.id),
+    onclick: () => pickJob(j.id), ondblclick: open,
+    onkeydown: e => {
+      if (e.target !== e.currentTarget) return;
+      if (e.key === 'Enter') open();
+      if (e.key === ' ') { e.preventDefault(); pickJob(j.id); }
+    },
+  }, el('span', { class: 'st ' + f.tone }, el('b', { text: f.big }), el('i', { text: f.word })),
+    el('span', { class: 'nm', title: j.src_path || j.name }, el('span', {}, breakable(j.name))),
+    cell('Lines', String(j.cues)),
+    prog, cost,
+    el('button', { class: 'open', type: 'button', text: '›', title: 'Open this file', 'aria-label': `Open ${j.name}`, onclick: e => { e.stopPropagation(); open(); } }));
+}
+
+// The flagged lines of a finished file, for the pane: fetched once, when the file is first picked.
+function flagList(j) {
+  const rows = S.peek.get(j.id);
+  if (rows === undefined) {
+    S.peek.set(j.id, null);
+    api('/api/jobs/' + j.id).then(d => {
+      S.peek.set(j.id, d.rows.filter(r => r.flags.length));
+      if (S.pick === j.id) renderJobPane();
+    }).catch(() => S.peek.delete(j.id));
+  }
+  if (!rows) return el('p', { class: 'nothing', text: 'Looking…' });
+  const shown = rows.slice(0, 8);
+  return [el('ul', { class: 'flags' }, shown.map(r => el('li', {},
+    el('a', { class: 'mono link', href: '#/job/' + j.id, text: `line ${r.i + 1}`, onclick: () => { S.jump = r.i; } }),
+    el('span', {}, r.flags.map(fl => el('span', { class: 'tagc ' + (S.errors.includes(fl) ? 't-bad' : 't-check'), text: SHORT[fl] || fl, title: S.labels[fl] || '' })),
+      r.flags.includes('fast') && r.cps != null ? `${Math.round(r.cps)} characters a second` : '')))),
+    rows.length > shown.length && el('p', { class: 'nothing', text: `…and ${rows.length - shown.length} more. Review lists them all.` })];
+}
+
+// The file picked in the queue: what happened to it, what it cost, and what can be done with it.
+function renderJobPane() {
+  const pane = $('#jobPane'), j = S.jobs.get(S.pick);
+  if (!j) {
+    return pane.replaceChildren(el('p', { class: 'nothing', text: 'The file you pick in the queue is shown here: what it cost, which lines to check, and what you can do with it.' }));
+  }
+  const f = face(j), [done, total] = j.progress;
+  const open = () => { location.hash = '#/job/' + j.id; };
+  const key = (label, fn, cls, title) => el('button', { class: 'btn ' + (cls || ''), type: 'button', text: label, title, onclick: guard(fn) });
+  const keys = [];
+  if (startable(j)) keys.push(key(j.status === 'ready' ? 'Translate' : 'Resume', () => api(`/api/jobs/${j.id}/start`, {}), 'primary'));
+  if (active(j)) keys.push(key('Stop', () => api(`/api/jobs/${j.id}/cancel`, {})));
+  if (j.status === 'done') keys.push(key('Review', open, 'primary'), key('Download', () => download(j)));
+  else keys.push(key('Open', open, '', 'Look at its lines'));
+  if (!active(j)) keys.push(key('Remove', () => api(`/api/jobs/${j.id}`, undefined, 'DELETE'), 'danger', 'Take this file out of the queue'));
+
+  const mono = text => el('span', { class: 'mono', text }), soft = text => el('span', { class: 'muted', text });
+  const facts = [['Lines', String(j.cues)]];
+  if (j.via) facts.push(['From', j.via]);
+  if (j.used.target_name) facts.push(['Into', `${j.used.target_name}, with ${modelLabel(j.used.model)}`]);
+  if (j.status === 'done' && j.proofed.model) {
+    facts.push(['Proofread', `by ${modelLabel(j.proofed.model)}, ${j.changed ? plural(j.changed, 'line') + ' changed' : 'no changes'}`]);
+  }
+  if (j.spent.requests) {
+    facts.push(['Cost', [mono(money(j.spent.cost)), (j.est || {}).cost ? soft(` the estimate was ${money(j.est.cost)}`) : null]]);
+    facts.push(['Tokens', [mono(tokens(j.spent.inp + j.spent.out)), soft(` ${tokens(j.spent.inp)} in, ${tokens(j.spent.out)} out, ${plural(j.spent.requests, 'request')}`)]]);
+  } else if (startable(j)) {
+    facts.push(['Estimate', (j.est || {}).cost ? [mono(money(j.est.cost)), j.est.proof ? soft(` ${money(j.est.proof)} of it for proofreading`) : null] : 'no cost']);
+  }
+  if (j.saved_to) facts.push(['Saved to', mono(j.saved_to)]);
+
+  const flat = ['OK', '–', '!', '■', '…'].includes(f.big);
+  pane.replaceChildren(...[
+    el('div', { class: 'd-head' }, el('h2', { text: j.name, title: j.src_path || j.name }),
+      el('div', { class: 'chips' }, el('span', { class: 'chip ' + f.tone, text: flat ? f.word : `${f.big} ${f.word}` }))),
+    el('div', { class: 'keys' }, keys),
+    j.error && el('p', { class: 'alert t-bad', text: j.error }),
+    active(j) && el('div', { class: 'sec' }, el('span', { class: 'label', text: 'Progress' }),
+      el('span', { class: 'bar' }, el('i', { style: `width:${total ? Math.round(100 * done / total) : 0}%` })),
+      el('p', { class: 'nothing', text: j.status === 'queued' ? 'Waiting its turn.' : j.doing === 'proofread' ? 'Proofreading the whole translation.' : `${done} of ${total} lines` })),
+    el('dl', { class: 'pairs' }, facts.flatMap(([k, v]) => [el('dt', { class: 'label', text: k }), el('dd', {}, v)])),
+    j.status === 'done' && j.flagged > 0 && el('div', { class: 'sec' }, el('span', { class: 'label', text: `To check (${j.flagged})` }), flagList(j)),
+  ].filter(Boolean));
 }
 
 function upsertJob(j) {
   const before = S.jobs.get(j.id);
   if (!before || before.status !== j.status || !before.ref !== !j.ref) libraryFollows(j);
+  if (!before || before.status !== j.status || before.flagged !== j.flagged) S.peek.delete(j.id);
   S.jobs.set(j.id, j);
   if (!active(j)) delete S.ticker[j.id];
   const old = $(`.job[data-id="${j.id}"]`);
-  if (old) old.replaceWith(jobRow(j));
-  else renderQueue();
+  if (old) {
+    old.replaceWith(jobRow(j));
+    if (S.pick === j.id) renderJobPane();
+  } else renderQueue();
   renderSummary();
   if (S.open === j.id) onOpenJobChanged(j);
 }
@@ -285,6 +386,12 @@ const openJob = guard(async id => {
   $('#review').hidden = false;
   renderReview();
   window.scrollTo(0, 0);
+  if (S.jump != null) {  // came here from a line listed in the queue's pane
+    const line = S.jump;
+    S.jump = null;
+    select(line);
+    S.rowEls.get(line)?.scrollIntoView({ block: 'center' });
+  }
 });
 
 function closeJob() {
@@ -623,6 +730,7 @@ const saveEdit = guard(async (r, cell, paint) => {
 });
 
 // ── the selected line as a viewer sees it ──────────────────────────────────
+const BESIDE = '(min-width: 1000px)';  // from this width the selected line has a pane of its own beside the list
 // Tags are dropped, apart from the ones a player draws: italics, bold, underline and where on
 // the screen the line sits ({\an8} is top centre).
 function onScreen(text) {
@@ -645,20 +753,39 @@ function renderPreview(typed) {
   const box = $('#prev'), d = S.detail;
   const r = d && d.rows.find(x => x.i === S.sel);
   const text = r ? typed ?? r.tr : null;
-  const beside = matchMedia('(min-width: 1400px)').matches;  // room for it next to the list: it stays there
+  const beside = matchMedia(BESIDE).matches;  // room for it next to the list: it stays there
   const on = S.preview && !!d && (beside || text != null);
   box.hidden = !on;
   $('#rvBody').classList.toggle('has-prev', on);
   if (!on) return;
-  const screen = $('#prevScreen'), sub = $('#prevSub'), facts = $('#prevFacts');
+  const screen = $('#prevScreen'), sub = $('#prevSub'), facts = $('#prevFacts'), head = $('#prevHead'), more = $('#prevMore');
   const longest = S.cfg.max_chars || 42, limit = S.cfg.max_cps || 21;
   screen.style.setProperty('--max-chars', longest);
   if (text == null) {
     screen.className = 'prev-screen';
     sub.replaceChildren();
+    head.replaceChildren(el('h2', { text: 'No line selected' }));
+    more.replaceChildren();
     facts.replaceChildren(el('div', { class: 'prev-none', text: 'Select a line to see it the way a viewer does.' }));
     return;
   }
+  head.replaceChildren(el('h2', { text: `Line ${r.i + 1}` }), el('div', { class: 'chips' },
+    r.flags.map(f => el('span', { class: 'chip ' + (S.errors.includes(f) ? 'red' : 'amber'), text: SHORT[f] || f })),
+    r.ed && el('span', { class: 'chip', text: 'edited' }), r.pv != null && el('span', { class: 'chip', text: 'proofread' }),
+    r.s != null && el('span', { class: 'label', text: `${clock(r.s)} → ${clock(r.e)}` })));
+  const original = el('div', { class: 'src' });
+  draw(original, r.src);
+  const again = !active(d) && r.tr != null && d.status !== 'ready';
+  more.replaceChildren(...[
+    ...r.flags.filter(f => S.labels[f]).map(f => el('p', { class: 'alert ' + (S.errors.includes(f) ? 't-bad' : 't-check'), text: S.labels[f] })),
+    el('div', { class: 'sec' }, el('span', { class: 'label', text: 'Original' }), original),
+    el('div', { class: 'keys' },
+      again && el('button', { class: 'btn primary', type: 'button', text: 'Translate this line again', onclick: () => {
+        S.rowEls.get(r.i)?.scrollIntoView({ block: 'nearest' });
+        toggleRedo(r);
+      } }),
+      d.rows.some(x => x.flags.length && x.i !== r.i) && el('button', { class: 'btn', type: 'button', text: 'Next to check', onclick: nextToCheck })),
+  ]);
   const place = +((/\\an([1-9])/.exec(text) || [])[1] || 2);  // numbered like a keypad: 2 is bottom centre
   const side = place % 3 === 1 ? 'left' : place % 3 === 0 ? 'right' : '';
   screen.className = ['prev-screen', place >= 7 ? 'top' : place >= 4 ? 'middle' : '', side].filter(Boolean).join(' ');
@@ -684,6 +811,15 @@ function renderPreview(typed) {
       lines.some(n => n > longest) || lines.length > 3));
   }
   facts.replaceChildren(...out);
+}
+
+// The next flagged line after the selected one that the filter is showing, wrapping round at the end.
+function nextToCheck() {
+  const rows = S.detail.rows, at = rows.findIndex(x => x.i === S.sel);
+  const next = [...rows.slice(at + 1), ...rows.slice(0, Math.max(at, 0))].find(x => x.flags.length && !S.rowEls.get(x.i).hidden);
+  if (!next) return toast('No other line to check among the ones shown.');
+  select(next.i);
+  S.rowEls.get(next.i).scrollIntoView({ block: 'center' });
 }
 
 function toggleRedo(r) {
@@ -713,7 +849,7 @@ function toggleRedo(r) {
 // episodes of every show looked at so far: they are fetched a few shows at a time once the list
 // is in, so each row can say how far along it is without being unfolded.
 const L = {
-  data: null, tab: 'shows', query: '', only: 'all', open: new Set(), eps: new Map(), nodes: new Map(),
+  data: null, tab: 'shows', query: '', only: 'all', pick: null, movie: null, eps: new Map(), nodes: new Map(),
   loading: false, run: 0, at: 0, stale: false,
 };
 const VIDEO_STATE = {
@@ -753,21 +889,33 @@ function wanted(t) {
 }
 
 function progressCell(t) {
-  if (!t) return el('span', { class: 'lib-prog wait', text: 'Looking…' });
-  const lang = L.data.target, left = t.missing + t.queued, stuck = t.nosource + t.gone;
+  if (!t) return el('span', { class: 'lib-prog wait', 'data-l': 'Episodes' }, el('span', { class: 'sub', text: 'Looking…' }));
+  const lang = L.data.target, stuck = t.nosource + t.gone;
   const parts = [];
   if (t.have) parts.push(`${t.have} came with ${lang} subtitles`);
   if (t.ours) parts.push(`${t.ours} translated by Subtle`);
   if (t.queued) parts.push(`${t.queued} in the queue`);
   if (t.missing) parts.push(`${t.missing} missing`);
   if (stuck) parts.push(`${stuck} that cannot be translated`);
-  const word = t.done === t.total ? el('span', { class: 'badge green', text: '✓ All done' })
-    : left ? el('span', { class: 'badge', text: `${left} missing` })
-    : el('span', { class: 'badge plain', text: `${stuck} cannot be translated` });
-  return el('span', { class: 'lib-prog', title: parts.join(' · ') },
+  return el('span', { class: 'lib-prog', 'data-l': 'Episodes', title: parts.join(' · ') },
     el('span', { class: 'bar' }, el('i', { style: `width:${t.total ? Math.round(100 * t.done / t.total) : 0}%` })),
-    el('b', { text: `${t.done} of ${t.total}` }), word, t.ours > 0 && el('span', { class: 'by', text: `${t.ours} by Subtle` }));
+    el('span', { class: 'sub', text: `${t.done} of ${t.total}` + (t.queued ? ` · ${t.queued} in the queue` : '') }));
 }
+
+// How a show looks on the board, from the count of its episodes.
+function showFace(t, failed) {
+  if (failed) return { tone: 't-bad', big: '!', word: 'could not look' };
+  if (!t) return { tone: 't-idle', big: '…', word: 'looking' };
+  const left = t.missing + t.queued, figure = `${t.done}/${t.total}`;
+  if (t.done === t.total) return { tone: 't-done', big: figure, word: 'all done' };
+  if (left) return { tone: t.done ? 't-check' : 't-bad', big: figure, word: `${left} missing` };
+  return { tone: 't-idle', big: figure, word: 'cannot be done' };
+}
+const MOVIE_FACE = {
+  have: ['t-done', 'OK', 'has subtitles'], ours: ['t-run', 'OK', 'by Subtle'], missing: ['t-check', '–', 'missing'],
+  queued: ['t-run', '…', 'in the queue'], nosource: ['t-idle', '–', 'no source'], gone: ['t-bad', '!', 'file not found'],
+};
+const stateBlock = f => el('span', { class: 'st ' + f.tone }, el('b', { class: f.big.length > 4 ? 'long' : '', text: f.big }), el('i', { text: f.word }));
 
 // One show: fetch its episodes and redraw its rows. Used for the background pass over every
 // show, for unfolding one, and when a translation of one of its episodes finishes.
@@ -848,62 +996,96 @@ function autoSwitch(label, on, change, disabled, title) {
   return el('label', { class: 'check lib-auto', title, onclick: e => e.stopPropagation() }, box, label);
 }
 
-function addButton(kind, missing, series) {
+function addButton(kind, missing, series, cls) {
   return el('button', {
-    class: 'btn small', text: `Add ${missing.length} missing to the queue`,
+    class: 'btn ' + (cls || 'small'), text: `Add ${missing.length} missing to the queue`,
     title: 'Puts them in the queue with a cost estimate each. Nothing is spent until you press Translate there.',
     onclick: e => { e.stopPropagation(); queueMissing(kind, missing.map(v => v.id), series); },
   });
 }
 
-function showRows(show) {
-  const unfolded = L.open.has(show.id), eps = L.eps.get(show.id), failed = eps instanceof Error;
+const showAuto = show => autoSwitch('New episodes', show.auto || L.data.auto_all, on => setAuto({ series: show.id, on }), L.data.auto_all,
+  L.data.auto_all ? 'On for every show (the switch above the list)' : 'Translate new episodes of this show as they arrive');
+
+// One show on the board. Picking it puts its episodes in the pane beside the board.
+function showRow(show) {
+  const eps = L.eps.get(show.id), failed = eps instanceof Error;
   const t = Array.isArray(eps) ? tally(eps) : null;
-  const toggle = () => {
-    unfolded ? L.open.delete(show.id) : L.open.add(show.id);
-    if (!unfolded && !L.eps.has(show.id)) fetchShow(show.id);
-    refreshShow(show.id);
+  const pick = () => {
+    L.pick = show.id;
+    if (!L.eps.has(show.id)) fetchShow(show.id);
+    renderLibrary();
   };
-  const head = el('div', {
-    class: 'lib-row show', tabIndex: 0, role: 'button', 'aria-expanded': String(unfolded), onclick: toggle,
-    onkeydown: e => { if (e.key === 'Enter' && e.target === e.currentTarget) toggle(); },
-  }, el('span', { class: 'chev', text: '›' }),
-    el('div', { class: 'lib-title' }, show.title, show.year && el('small', { text: show.year })),
-    failed ? el('span', { class: 'lib-prog wait', text: 'Could not look', title: eps.message }) : progressCell(t),
-    autoSwitch('New episodes', show.auto || L.data.auto_all, on => setAuto({ series: show.id, on }), L.data.auto_all,
-      L.data.auto_all ? 'On for every show (the switch above the list)' : 'Translate new episodes of this show as they arrive'));
-  if (!unfolded) return [head];
-  if (failed) return [head, el('div', { class: 'lib-eps' }, el('div', { class: 'lib-sum', text: eps.message }))];
-  if (!t) return [head, el('div', { class: 'lib-eps' }, el('div', { class: 'lib-sum', text: 'Looking at the files…' }))];
+  return el('div', {
+    class: 'brow show', tabIndex: 0, 'aria-pressed': String(L.pick === show.id), onclick: pick,
+    onkeydown: e => { if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) { e.preventDefault(); pick(); } },
+  }, stateBlock(showFace(t, failed)),
+    el('span', { class: 'nm' }, show.title, show.year && el('span', { class: 'sub', text: show.year })),
+    failed ? el('span', { class: 'lib-prog', 'data-l': 'Episodes', title: eps.message }, el('span', { class: 'sub bad', text: 'Could not look' })) : progressCell(t),
+    el('span', { 'data-l': 'By Subtle' }, t && t.ours ? [String(t.ours), el('span', { class: 'sub', text: t.ours === 1 ? 'episode' : 'episodes' })] : '–'),
+    el('span', {}, showAuto(show)),
+    el('span', { class: 'open', text: '›' }));
+}
+
+// The episodes of the picked show, season by season.
+function showPane(show) {
+  const eps = L.eps.get(show.id), failed = eps instanceof Error;
+  const t = Array.isArray(eps) ? tally(eps) : null, f = showFace(t, failed);
+  const head = el('div', { class: 'd-head' }, el('h2', { text: show.title }), el('div', { class: 'chips' },
+    el('span', { class: 'chip ' + f.tone, text: f.word }), show.year && el('span', { class: 'label', text: show.year })));
+  if (failed) return [head, el('p', { class: 'alert t-bad', text: eps.message })];
+  if (!t) return [head, el('p', { class: 'nothing', text: 'Looking at the files…' })];
   const missing = eps.filter(e => e.state === 'missing');
-  const box = el('div', { class: 'lib-eps' }, el('div', { class: 'lib-sum' },
-    `${t.done} of ${t.total} have ${L.data.target} subtitles` + (t.ours ? ` · ${t.ours} translated by Subtle` : '')
-      + (t.missing + t.queued ? ` · ${t.missing + t.queued} missing` + (t.queued ? ` (${t.queued} in the queue)` : '') : ''),
-    missing.length > 0 && addButton('sonarr', missing, show.id)));
-  let season = null;
+  const out = [head,
+    el('p', { class: 'lib-sum', text: `${t.done} of ${t.total} have ${L.data.target} subtitles` + (t.ours ? ` · ${t.ours} translated by Subtle` : '')
+      + (t.missing + t.queued ? ` · ${t.missing + t.queued} missing` + (t.queued ? ` (${t.queued} in the queue)` : '') : '') }),
+    el('div', { class: 'keys' }, missing.length > 0 && addButton('sonarr', missing, show.id, 'primary'), showAuto(show))];
+  let season = null, list = null;
   for (const e of eps) {
     if (e.season !== season) {
       season = e.season;
-      box.append(el('div', { class: 'lib-season', text: season ? `Season ${season}` : 'Specials' }));
+      list = el('div', { class: 'sec' }, el('span', { class: 'label', text: season ? `Season ${season}` : 'Specials' }));
+      out.push(list);
     }
-    box.append(el('div', { class: 'lib-ep' },
+    list.append(el('div', { class: 'lib-ep' },
       el('span', { class: 'num', text: 'E' + String(e.number).padStart(2, '0') }),
-      el('span', { class: 'what' }, e.title, ['nosource', 'gone', 'queued'].includes(e.state) && el('span', { class: 'why', text: e.note })),
-      madeNote(e) || el('span'), stateBadge(e)));
+      el('span', { class: 'what', text: e.title }), stateBadge(e), madeNote(e),
+      ['nosource', 'gone', 'queued'].includes(e.state) && e.note && el('span', { class: 'why', text: e.note })));
   }
-  return [head, box];
+  return out;
+}
+
+function movieRow(m) {
+  const [tone, big, word] = MOVIE_FACE[m.state] || ['t-idle', '?', m.state || 'not looked at'];
+  const pick = () => { L.movie = m.id; renderLibrary(); };
+  return el('div', {
+    class: 'brow', tabIndex: 0, 'aria-pressed': String(L.movie === m.id), onclick: pick,
+    onkeydown: e => { if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) { e.preventDefault(); pick(); } },
+  }, stateBlock({ tone, big, word }),
+    el('span', { class: 'nm' }, m.title, m.year && el('span', { class: 'sub', text: m.year })),
+    el('span', { 'data-l': '' }, madeNote(m) || (['nosource', 'gone', 'queued'].includes(m.state) && m.note ? el('span', { class: 'sub', text: m.note }) : null)),
+    el('span', { class: 'open', text: '›' }));
+}
+
+function moviePane(m) {
+  const [tone, , word] = MOVIE_FACE[m.state] || ['t-idle', '?', m.state || 'not looked at'];
+  return [el('div', { class: 'd-head' }, el('h2', { text: m.title }), el('div', { class: 'chips' },
+    el('span', { class: 'chip ' + tone, text: word }), m.year && el('span', { class: 'label', text: m.year }))),
+    m.state === 'missing' && el('div', { class: 'keys' }, addButton('radarr', [m], undefined, 'primary')),
+    m.note && el('p', { class: 'nothing', text: m.note }),
+    m.made && el('div', { class: 'sec' }, el('span', { class: 'label', text: 'Translated' }), madeNote(m))].filter(Boolean);
 }
 
 // Redraw one show where it stands, leaving the rest of the list (and whatever has focus) alone.
 function refreshShow(id) {
   const show = L.data && L.data.sonarr.items.find(s => s.id === id), old = L.nodes.get(id);
   if (L.tab !== 'shows') return;
-  if (L.only !== 'all' || !show || !old || !old[0].isConnected) return renderLibrary();
-  const fresh = showRows(show), focused = old[0] === document.activeElement;
-  old[0].replaceWith(...fresh);
-  old.slice(1).forEach(n => n.remove());
+  if (L.only !== 'all' || !show || !old || !old.isConnected) return renderLibrary();
+  const fresh = showRow(show), focused = old === document.activeElement;
+  old.replaceWith(fresh);
   L.nodes.set(id, fresh);
-  if (focused) fresh[0].focus();
+  if (focused) fresh.focus();
+  if (L.pick === id) $('#libPane').replaceChildren(...showPane(show));
   librarySummary();
   libraryFilters();
 }
@@ -948,9 +1130,10 @@ function librarySummary() {
 function renderLibrary() {
   const d = L.data, note = $('#libNote'), body = $('#libBody'), tools = $('#libTools'), head = $('#libHead');
   librarySummary();
+  const pane = $('#libPane');
   if (!d) {
     note.hidden = head.hidden = true;
-    return [$('#libTabs'), $('#libOnly'), tools, body].forEach(n => n.replaceChildren());
+    return [$('#libTabs'), $('#libOnly'), tools, body, pane].forEach(n => n.replaceChildren());
   }
   const shows = L.tab === 'shows', app = shows ? 'Sonarr' : 'Radarr';
   const { part, named, usable } = libraryItems();
@@ -979,22 +1162,23 @@ function renderLibrary() {
           'Translate each movie as it arrives, unless it already has subtitles'));
   }
   L.nodes = new Map();
-  const rows = shows ? items.flatMap(s => { const nodes = showRows(s); L.nodes.set(s.id, nodes); return nodes; })
-    : items.map(m => el('div', { class: 'lib-row' },
-      el('span'), el('div', { class: 'lib-title' }, m.title, m.year && el('small', { text: m.year }),
-        ['nosource', 'gone', 'queued'].includes(m.state) && el('span', { class: 'why', text: m.note })),
-      madeNote(m) || el('span'), m.state ? stateBadge(m) : el('span')));
+  if (shows && !items.some(s => s.id === L.pick)) L.pick = items.length ? items[0].id : null;
+  if (!shows && !items.some(m => m.id === L.movie)) L.movie = items.length ? items[0].id : null;
+  const rows = shows ? items.map(s => { const node = showRow(s); L.nodes.set(s.id, node); return node; }) : items.map(movieRow);
   if (!rows.length && part.connected && !part.error) {
     rows.push(el('div', { class: 'lib-empty', text: L.query || L.only !== 'all' ? 'Nothing matches.' : `${app} lists nothing with a file yet.` }));
   }
   head.hidden = !usable || !items.length;
-  head.className = 'lib-head ' + L.tab;
+  head.className = 'lib-head cols label ' + L.tab;
   body.className = 'lib ' + L.tab;
-  head.replaceChildren(el('span'), el('span', { text: shows ? 'Show' : 'Movie' }),
-    el('span', { text: shows ? `Episodes with ${d.target} subtitles` : '' }),
-    el('span', { text: shows ? 'Auto-translate' : `${d.target} subtitles` }));
+  head.replaceChildren(...(shows
+    ? [d.target, 'Show', 'Episodes', 'By Subtle', 'Translate', '']
+    : [d.target, 'Movie', 'Translated', '']).map(text => el('span', { text })));
   body.hidden = !rows.length;
   body.replaceChildren(...rows);
+  const picked = shows ? items.find(s => s.id === L.pick) : items.find(m => m.id === L.movie);
+  pane.replaceChildren(...(picked ? (shows ? showPane(picked) : moviePane(picked))
+    : [el('p', { class: 'nothing', text: usable ? `The ${shows ? 'show' : 'movie'} you pick is shown here.` : '' })]));
 }
 
 // ── live events ────────────────────────────────────────────────────────────
@@ -1016,6 +1200,7 @@ function onEvent(ev) {
   if (ev.type === 'removed') {
     if (S.jobs.has(ev.id)) libraryFollows(S.jobs.get(ev.id));
     S.jobs.delete(ev.id);
+    S.peek.delete(ev.id);
     if (S.open === ev.id) location.hash = '#/';
     return renderQueue();
   }
@@ -1455,7 +1640,7 @@ function bind() {
     try { localStorage.setItem('subtle-preview', S.preview ? '1' : '0'); } catch (err) {}
     if (S.detail) renderPreview();
   };
-  matchMedia('(min-width: 1400px)').addEventListener('change', () => { if (S.detail) renderPreview(); });
+  matchMedia(BESIDE).addEventListener('change', () => { if (S.detail) renderPreview(); });
   // What sticks below the top bar needs its height, which grows when the demo notice wraps under it.
   const bar = $('.top');
   new ResizeObserver(() => document.documentElement.style.setProperty('--bar', bar.offsetHeight + 'px')).observe(bar);

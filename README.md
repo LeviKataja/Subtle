@@ -19,7 +19,7 @@ Finnish; everything else has only met the built-in fake model. What has and has 
 | Part | State |
 |---|---|
 | Translating, the web UI | Covered by the tests and tried by hand. Two live runs on Haiku 5.5: a 936-line film for $0.014, and a fast-talking 1,878-line one for about 5 cents. A native speaker called the first good enough to watch, with some lines that read oddly. Other languages and models are untried. |
-| Line preview, word-level proofreading marks, tab title, notifications, phone layout | The page itself has no tests. These were driven in a headless Chrome on the demo show, at desktop and phone width. Nobody has used them on a real file yet, a real notification has never been seen, and Chrome is the only browser tried. |
+| The page layout, line preview, word-level proofreading marks, tab title, notifications, phone layout | The page itself has no tests. These were driven in a headless Chrome on the demo show, at desktop and phone width. Nobody has used them on a real file yet, a real notification has never been seen, and Chrome is the only browser tried. |
 | Proofreading | Covered by the tests. One live run: Sonnet 5.5 reading the 1,878-line translation changed 44 lines for about 21 cents. Whether those were the right 44 has not been judged yet. The default, a model reading its own translation, has not had a live run. |
 | Repair | Covered by the tests. Not looked at in the live runs. |
 | Subtitles inside video files | Tried with real ffmpeg on MKV and MP4 files. Picture-based tracks only with stand-in data. |
@@ -195,9 +195,14 @@ to read less naturally than Claude. Try one episode and read it before queueing 
 
 ## What the UI does
 
-![The queue: one file done, one being translated, one waiting, each with its cost](docs/queue.png)
+![The queue: one file with two lines to check, one being translated and one waiting, with the selected file's cost and its lines to check in a pane on the right](docs/queue.png)
 
 - Queue with a cost estimate per file, live progress and the line currently being translated.
+  Each file's state is a coloured block: waiting, translating, done, or how many lines to check.
+- Select a file and a pane beside the queue shows what it cost, what was done to it and which
+  lines to check. The arrow at the end of its row, or a double-click, opens it.
+- Anything you can press is drawn as a key, an outline with an edge under it. Coloured blocks
+  and tags only tell you a state.
 - **Add a folder** scans a path on disk and writes each translation beside its source.
 - The browser tab's title says how far along the queue is, and that it has finished until you
   look. **Settings → Notifications** adds a browser notification for that; browsers only allow
@@ -205,8 +210,9 @@ to read less naturally than Claude. Try one episode and read it before queueing 
 - Review screen: original and translation side by side, filling in as the model streams.
   Click a line to edit it. `Ctrl+Enter` moves to the next line, `Esc` reverts, `/` searches.
   Formatting tags stay in the text, dimmed, and italics are drawn as italics.
-- The line you select is drawn the way a viewer sees it, with how long it stays on screen set
-  against how long it takes to read at the speed limit. The dashed lines mark the longest line
+- The line you select is drawn the way a viewer sees it in a pane beside the list (above it
+  on a narrow window), with how long it stays on screen set against how long it takes to read
+  at the speed limit. The dashed lines mark the longest line
   allowed. The **Preview** box switches this off.
 - Lines that fail a check are flagged. **Fix flagged lines** re-sends only those: untranslated
   ones are redone, lines too long for their time on screen are shortened. With a filter or a
@@ -218,7 +224,7 @@ to read less naturally than Claude. Try one episode and read it before queueing 
   the glossary sit behind **Change**, under a line that says what they are set to.
 - Glossary for names and terms. Only entries that occur in a request are sent with it.
 
-![The review screen: the selected line drawn as a viewer sees it, above the original and translation side by side, with that line flagged as too fast to read](docs/review.png)
+![The review screen: original and translation side by side, and beside them the selected line drawn as a viewer sees it, flagged as too fast to read](docs/review.png)
 
 ## Layout
 
@@ -281,12 +287,12 @@ field for the right one. To add the webhook by hand instead, **Automation** has 
 
 Once Sonarr or Radarr is connected, **Library** lists their shows and movies. Each show says
 how many of its episodes have subtitles in your language and how many of those Subtle
-translated; the counts fill in a few shows at a time after the page opens. Unfold a show to see
-each episode: it has subtitles in your language, it was translated by Subtle (with the model,
+translated; the counts fill in a few shows at a time after the page opens. Select a show to see
+each episode beside the list: it has subtitles in your language, it was translated by Subtle (with the model,
 the cost and the date), it is in the queue, it is missing them, or there is nothing to
 translate from.
 
-![The Library page: each show with a bar for how many episodes have subtitles, one show unfolded with its episodes marked as having subtitles, translated by Subtle, missing, or with nothing to translate from](docs/library.png)
+![The Library page: each show with a bar for how many episodes have subtitles, one show selected, and beside the list its episodes marked as having subtitles, translated by Subtle, missing, or with nothing to translate from](docs/library.png)
 
 - **Missing** and **Translated by Subtle** above the list narrow it to the shows or movies
   that have any of either.

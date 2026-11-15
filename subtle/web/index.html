@@ -26,9 +26,9 @@
     <a href="#/" id="navQueue" aria-current="page">Queue<span class="nav-live" id="navLive" title="Translating now" hidden></span></a>
     <a href="#/library" id="libBtn">Library</a>
   </nav>
-  <span class="tag" id="mockTag" hidden>Demo mode: fake translations, no API calls</span>
-  <div class="grow"></div>
-  <div class="spend" id="spend" title="Spent on the files currently in the queue"></div>
+  <span class="tag" id="mockTag" title="Fake translations, no API calls" hidden>Demo mode: no API calls</span>
+  <!-- Takes the room that is left; states that do not fit are left out, the last ones first. -->
+  <ul class="tally label" id="tally" aria-label="Files by state"></ul>
   <button class="btn ghost icon" id="themeBtn" aria-label="Switch between light and dark" title="Light / dark"></button>
   <button class="btn ghost lbl" id="autoBtn" title="Automation">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M13 2.5 4.5 13.5h6.5l-1 8 8.5-11.5H12z"/></svg>
@@ -41,13 +41,13 @@
 </header>
 
 <!-- ───────────── Queue ───────────── -->
-<main id="home" class="page">
+<main id="home" class="page work queue">
   <div class="banner" id="keyBanner" hidden>
     <div><strong>No API key yet.</strong> Subtle needs an Anthropic API key to translate with Claude, or a model running on your own machine (Settings). You can look around without either.</div>
     <button class="btn" id="keyBannerBtn">Set up</button>
   </div>
 
-  <section class="setup" aria-label="How to translate">
+  <section class="pane setup" aria-label="How to translate">
     <div class="field f-lang">
       <label for="lang">Translate into</label>
       <input id="lang" list="langs" placeholder="Choose a language…" autocomplete="off" spellcheck="false">
@@ -94,79 +94,100 @@
         <button class="btn" type="button" id="glossaryBtn">Glossary</button>
       </div>
     </div>
-  </section>
-
-  <section class="drop" id="drop">
-    <div class="drop-title">Drop subtitle files here</div>
-    <div class="drop-sub">.srt · .vtt · .ass · .txt &nbsp;—&nbsp; timing and formatting stay exactly as they are</div>
-    <div class="drop-actions">
-      <button class="btn" id="pickBtn">Choose files</button>
-      <button class="btn" id="folderBtn">Add a folder…</button>
-      <input type="file" id="picker" multiple accept=".srt,.vtt,.ass,.ssa,.txt" hidden>
+    <div class="drop" id="drop">
+      <div class="drop-title label">Drop subtitle files here</div>
+      <div class="drop-sub">.srt · .vtt · .ass · .txt. Timing and formatting stay exactly as they are.</div>
+      <div class="drop-actions">
+        <button class="btn small" id="pickBtn">Choose files</button>
+        <button class="btn small" id="folderBtn">Add a folder…</button>
+        <input type="file" id="picker" multiple accept=".srt,.vtt,.ass,.ssa,.txt" hidden>
+      </div>
     </div>
   </section>
 
-  <section class="queue" id="queue" hidden>
-    <div class="queue-head">
+  <section class="board" id="queue" aria-label="Queue">
+    <div class="strip queue-head">
       <h2>Queue</h2>
-      <span class="muted" id="queueSummary"></span>
       <div class="grow"></div>
-      <button class="btn ghost" id="clearBtn">Clear finished</button>
-      <button class="btn ghost" id="zipBtn">Download all</button>
       <button class="btn primary" id="goBtn">Translate</button>
     </div>
+    <div class="cols label" id="jobCols" aria-hidden="true"><span>State</span><span>File</span><span>Lines</span><span>Progress</span><span>Cost</span><span></span></div>
     <div class="jobs" id="jobs"></div>
+    <p class="empty" id="queueEmpty">Nothing in the queue yet. Drop subtitle files anywhere on this page, or choose them on the left.</p>
+    <div class="rest"></div>
+    <div class="strip foot" id="queueFoot" hidden>
+      <span class="label" id="queueSummary"></span>
+      <div class="spend" id="spend" title="Spent on the files currently in the queue"></div>
+      <div class="inline end">
+        <button class="btn small" id="clearBtn">Clear finished</button>
+        <button class="btn small" id="zipBtn">Download all</button>
+      </div>
+    </div>
   </section>
+
+  <aside class="pane" id="jobPane" aria-label="The selected file"></aside>
 </main>
 
 <!-- ───────────── Review ───────────── -->
-<main id="review" class="page wide" hidden>
-  <div class="rv-head">
-    <a class="back" href="#/">← Queue</a>
+<main id="review" class="page" hidden>
+  <div class="strip rv-head">
+    <a class="btn small back" href="#/">← Queue</a>
     <h1 id="rvName"></h1>
     <div class="chips" id="rvChips"></div>
     <div class="grow"></div>
     <div class="rv-actions" id="rvActions"></div>
   </div>
   <div class="rv-note" id="rvNote" hidden></div>
-  <div class="rv-bar">
-    <div class="tabs" id="rvTabs" role="tablist"></div>
-    <div class="grow"></div>
-    <label class="check" id="followWrap" hidden><input type="checkbox" id="follow" checked> Follow along</label>
-    <label class="check" title="Draw the line you select the way a viewer sees it"><input type="checkbox" id="prevOn" checked> Preview</label>
-    <input id="search" type="search" placeholder="Search lines…  ( / )" aria-label="Search lines">
-  </div>
-  <div class="rv-body" id="rvBody">
-    <div class="rv-list">
-      <div class="grid-head"><div>#</div><div>Time</div><div>Original</div><div>Translation</div><div></div></div>
+  <div class="work rv-body" id="rvBody">
+    <section class="board rv-list" aria-label="Lines">
+      <div class="strip rv-bar">
+        <div class="tabs" id="rvTabs" role="tablist"></div>
+        <div class="grow"></div>
+        <label class="check" id="followWrap" hidden><input type="checkbox" id="follow" checked> Follow along</label>
+        <label class="check" title="Draw the line you select the way a viewer sees it"><input type="checkbox" id="prevOn" checked> Preview</label>
+        <input id="search" type="search" placeholder="Search lines…  ( / )" aria-label="Search lines">
+      </div>
+      <div class="grid-head label"><div>#</div><div>Time</div><div>Original</div><div>Translation</div><div></div></div>
       <div class="rows" id="rows"></div>
       <div class="empty" id="rowsEmpty" hidden>Nothing matches.</div>
-    </div>
+      <div class="rest"></div>
+    </section>
     <aside class="prev" id="prev" aria-label="The selected line as a viewer sees it" hidden>
-      <div class="prev-screen" id="prevScreen" title="The dashed lines mark the longest line allowed"><div class="prev-sub" id="prevSub"></div></div>
-      <div class="prev-facts" id="prevFacts"></div>
+      <!-- The pane is as tall as the list; what is in it stays in view as the list scrolls. -->
+      <div class="pane stick">
+        <div class="d-head" id="prevHead"></div>
+        <div class="prev-screen" id="prevScreen" title="The dashed lines mark the longest line allowed"><div class="prev-sub" id="prevSub"></div></div>
+        <div class="prev-facts" id="prevFacts"></div>
+        <div class="prev-more" id="prevMore"></div>
+      </div>
     </aside>
   </div>
 </main>
 
 <!-- ───────────── Library ───────────── -->
 <main id="library" class="page" hidden>
-  <div class="rv-head">
+  <div class="strip rv-head">
     <h1>Library</h1>
-    <span class="muted" id="libSummary"></span>
+    <span class="label" id="libSummary"></span>
     <div class="grow"></div>
     <input id="libSearch" type="search" placeholder="Find a show or movie…" aria-label="Find a show or movie">
     <button class="btn" id="libRefresh" title="Ask Sonarr and Radarr again and look at the folders again">Refresh</button>
   </div>
   <div class="rv-note" id="libNote" hidden></div>
-  <div class="rv-bar">
-    <div class="tabs" id="libTabs" role="tablist"></div>
-    <div class="tabs" id="libOnly" role="tablist" aria-label="Which ones to list"></div>
-    <div class="grow"></div>
-    <div id="libTools" class="inline"></div>
+  <div class="work lib-work">
+    <section class="board" aria-label="Shows and movies">
+      <div class="strip rv-bar">
+        <div class="tabs" id="libTabs" role="tablist"></div>
+        <div class="tabs" id="libOnly" role="tablist" aria-label="Which ones to list"></div>
+        <div class="grow"></div>
+        <div id="libTools" class="inline"></div>
+      </div>
+      <div class="lib-head cols label" id="libHead"></div>
+      <div class="lib" id="libBody"></div>
+      <div class="rest"></div>
+    </section>
+    <aside class="pane" id="libPane" aria-label="The selected show or movie"></aside>
   </div>
-  <div class="lib-head" id="libHead"></div>
-  <div class="lib" id="libBody"></div>
 </main>
 
 <!-- ───────────── Dialogs ───────────── -->
