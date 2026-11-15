@@ -13,21 +13,24 @@ is not output from a live translation. The shows and movies are invented.*
 
 ## Status
 
-Early. Two films have been translated and one proofread against the live API, all English to
-Finnish; everything else has only met the built-in fake model. What has and has not been tried:
+Early, but in use. It has been tested by a small batch of users with limited QA skills: about
+50 episodes of several shows translated, running in Docker on a NAS next to Sonarr and Radarr,
+with results they call usable and good. No numbers were kept from that. The runs that were
+measured are two films translated and one proofread against the live API, English to Finnish.
+What has and has not been tried:
 
 | Part | State |
 |---|---|
-| Translating, the web UI | Covered by the tests and tried by hand. Two live runs on Haiku 5.5: a 936-line film for $0.014, and a fast-talking 1,878-line one for about 5 cents. A native speaker called the first good enough to watch, with some lines that read oddly. Other languages and models are untried. |
-| The page layout, line preview, word-level proofreading marks, tab title, notifications, phone layout | The page itself has no tests. These were driven in a headless Chrome on the demo show, at desktop and phone width. Nobody has used them on a real file yet, a real notification has never been seen, and Chrome is the only browser tried. |
+| Translating, the web UI | Covered by the tests and tried by hand. Two live runs on Haiku 5.5: a 936-line film for $0.014, and a fast-talking 1,878-line one for about 5 cents. A native speaker called the first good enough to watch, with some lines that read oddly. About 50 episodes of several shows have been translated since, with results reported as usable and good; the language, the model and the cost of those were not recorded. No other language or model has a measured run. |
+| The page layout, line preview, word-level proofreading marks, tab title, notifications, phone layout | The page itself has no tests. These were driven in a headless Chrome on the demo show, at desktop and phone width. The layout was redrawn after the 50 episodes above, and nobody has used the new one on a real file yet. A real notification has never been seen, and Chrome is the only browser tried. |
 | Proofreading | Covered by the tests. One live run: Sonnet 5.5 reading the 1,878-line translation changed 44 lines for about 21 cents. Whether those were the right 44 has not been judged yet. The default, a model reading its own translation, has not had a live run. |
 | Repair | Covered by the tests. Not looked at in the live runs. |
 | Subtitles inside video files | Tried with real ffmpeg on MKV and MP4 files. Picture-based tracks only with stand-in data. |
-| Sonarr, Radarr, the Library page | Written against their source and tested against stand-ins. One user has since run them against a real Sonarr and Radarr and reports that it works; which parts that covered is not recorded. |
+| Sonarr, Radarr, the Library page | Written against their source and tested against stand-ins. They have since been run against a real Sonarr and Radarr, and the integration is reported to work well; which parts that covered (the webhook, new episodes translating themselves, movies) is not recorded. |
 | Bazarr | Written against its source and tested against a stand-in. Not tried with a real instance. |
 | Local models | Written against Ollama's documentation and the OpenAI chat format, and tested against a stand-in server. Never run against a real Ollama, LM Studio or llama.cpp, and nobody has looked at what a local model makes of a subtitle file. |
-| The report (`subtle report`) | Covered by tests on a made-up data folder filled with keys, addresses and show names, none of which reach the report. Never run on a real install. |
-| Dockerfile | Never built. |
+| The report (`subtle report`) | Covered by tests on a made-up data folder filled with keys, addresses and show names, none of which reach the report. Run once inside the Docker container on a new install with nothing translated, where it wrote its file. Not yet run on an install with real translations behind it. |
+| Dockerfile | Built and started once with Docker Engine 29 on Rocky Linux 9: the image builds, the page answers, the data folder is created, and it rebuilds after an update. Nothing was translated in that container. It also runs in Docker on a NAS; that setup has not been looked at from here. |
 
 Start with one file and a low spending cap, and read the result before trusting it with a library.
 
